@@ -2,6 +2,12 @@
 
 > 公务员 / 事业单位考试题库，含题干、参考答案、答题演示、考点。
 
+## 项目来源与致谢
+
+本项目基于 [zzcc-nb/gongkao-tiku](https://github.com/zzcc-nb/gongkao-tiku) 仓库进行二次开发，在其题库和相关资料的基础上，增加了墨卷练习工作台、题库索引构建、刷题进度、收藏/错题管理、离线自评以及 OpenAI 兼容大模型辅助能力。
+
+感谢 [zzcc-nb/gongkao-tiku](https://github.com/zzcc-nb/gongkao-tiku) 项目作者提供题库、参考答案、答题演示及相关整理工作，为本项目的学习工具开发提供基础数据支持。
+
 ## 墨卷练习工作台
 
 仓库现在包含一个可直接运行的 Vite Web 应用：
