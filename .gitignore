@@ -1,0 +1,6 @@
+node_modules/
+dist/
+public/data/
+.impeccable/
+.playwright-mcp/
+artifacts/

@@ -1,0 +1,571 @@
+import { createIcons, icons } from 'lucide';
+import './styles.css';
+
+const STORAGE_KEY = 'mojuan.practice.v1';
+const SETTINGS_KEY = 'mojuan.settings.v1';
+const DEFAULT_SETTINGS = {
+  endpoint: 'https://api.openai.com/v1',
+  model: 'gpt-4o-mini',
+  apiKey: '',
+  aiEnabled: true,
+};
+
+const app = document.querySelector('#app');
+const state = {
+  manifest: null,
+  question: null,
+  questionLoading: false,
+  view: location.hash.replace('#', '') || 'desk',
+  filters: { subject: '全部', category: '全部', mode: '全部', search: '' },
+  queue: [],
+  queueIndex: 0,
+  loadedAnswer: false,
+  submitted: false,
+  aiLoading: false,
+  aiResult: null,
+  toast: '',
+  practiceText: '',
+};
+
+const store = loadJson(STORAGE_KEY, {
+  completed: {},
+  favorites: {},
+  mistakes: {},
+  answers: {},
+  sessions: [],
+});
+let settings = { ...DEFAULT_SETTINGS, ...loadJson(SETTINGS_KEY, {}) };
+
+function loadJson(key, fallback) {
+  try {
+    return JSON.parse(localStorage.getItem(key)) || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function persist() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+}
+
+function persistSettings() {
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+}
+
+function escapeHtml(value = '') {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
+function formatText(value = '') {
+  const normalized = value.replace(/\r/g, '').trim();
+  if (!normalized) return '<p class="muted">暂无内容。</p>';
+  return normalized
+    .split(/\n{2,}/)
+    .map((paragraph) => {
+      const text = paragraph.trim();
+      if (/^\d+[.、]/.test(text) || /^[一二三四五六七八九十]+、/.test(text)) {
+        return `<p>${escapeHtml(text).replace(/([0-9一二三四五六七八九十]+[.、])/g, '<strong>$1</strong>')}</p>`;
+      }
+      return `<p>${escapeHtml(text).replaceAll('\n', '<br>')}</p>`;
+    })
+    .join('');
+}
+
+function renderMarkdownPreview(value = '') {
+  return value
+    .split('\n')
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return '';
+      if (trimmed.startsWith('### ')) return `<h4>${escapeHtml(trimmed.slice(4))}</h4>`;
+      if (trimmed.startsWith('## ')) return `<h3>${escapeHtml(trimmed.slice(3))}</h3>`;
+      if (trimmed.startsWith('# ')) return `<h2>${escapeHtml(trimmed.slice(2))}</h2>`;
+      if (trimmed.startsWith('- ')) return `<li>${escapeHtml(trimmed.slice(2))}</li>`;
+      return `<p>${escapeHtml(trimmed)}</p>`;
+    })
+    .join('');
+}
+
+function icon(name, label = '') {
+  return `<i data-lucide="${name}"${label ? ` aria-label="${escapeHtml(label)}"` : ''}></i>`;
+}
+
+function hydrateIcons() {
+  createIcons({ icons, attrs: { 'stroke-width': 1.8 } });
+}
+
+function showToast(message) {
+  state.toast = message;
+  render();
+  window.clearTimeout(showToast.timer);
+  showToast.timer = window.setTimeout(() => {
+    state.toast = '';
+    render();
+  }, 2600);
+}
+
+function categories() {
+  return [...new Set((state.manifest?.questions || []).map((item) => item.category))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+}
+
+function filteredQuestions() {
+  const search = state.filters.search.trim().toLowerCase();
+  return (state.manifest?.questions || []).filter((item) => {
+    const categoryMatch = state.filters.category === '全部' || item.category === state.filters.category;
+    const subjectMatch = state.filters.subject === '全部' || item.subject === state.filters.subject;
+    const modeMatch = state.filters.mode === '全部' || item.mode === state.filters.mode;
+    const searchMatch = !search || `${item.title} ${item.detailType} ${item.themes?.join(' ')}`.toLowerCase().includes(search);
+    return categoryMatch && subjectMatch && modeMatch && searchMatch;
+  });
+}
+
+function counts() {
+  const questions = state.manifest?.questions || [];
+  return {
+    total: questions.length,
+    completed: Object.keys(store.completed).length,
+    favorites: Object.keys(store.favorites).length,
+    mistakes: Object.keys(store.mistakes).length,
+    today: store.sessions.filter((item) => item.date === today()).length,
+  };
+}
+
+function today() {
+  return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+}
+
+function progressPercent() {
+  const total = counts().total || 1;
+  const completed = counts().completed;
+  return completed ? Math.max(1, Math.round((completed / total) * 100)) : 0;
+}
+
+async function loadManifest() {
+  try {
+    const response = await fetch('/data/index.json');
+    if (!response.ok) throw new Error('题库索引尚未生成');
+    state.manifest = await response.json();
+  } catch (error) {
+    app.innerHTML = `<main class="boot-error"><div class="paper-note"><p class="eyebrow">墨卷 / 数据层</p><h1>还差一步，题库正在整理</h1><p>${escapeHtml(error.message)}。请运行 <code>npm run dev</code> 或先运行 <code>npm run build:data</code>。</p></div></main>`;
+    throw error;
+  }
+}
+
+async function loadQuestion(id) {
+  if (!id) return;
+  state.questionLoading = true;
+  render();
+  const response = await fetch(`/data/questions/${encodeURIComponent(id)}.json`);
+  state.question = await response.json();
+  state.questionLoading = false;
+  state.loadedAnswer = false;
+  state.submitted = Boolean(store.completed[id]);
+  state.aiResult = null;
+  state.practiceText = store.answers[id]?.text || '';
+  render();
+}
+
+function selectQuestion(id) {
+  state.view = 'practice';
+  location.hash = 'practice';
+  loadQuestion(id);
+}
+
+function selectFromQueue() {
+  if (!state.queue.length) {
+    showToast('没有符合当前筛选条件的题目');
+    return;
+  }
+  state.queueIndex = Math.min(state.queueIndex, state.queue.length - 1);
+  selectQuestion(state.queue[state.queueIndex].id);
+}
+
+function prepareQueue(items = filteredQuestions()) {
+  state.queue = items;
+  state.queueIndex = Math.max(0, items.findIndex((item) => item.id === state.question?.id));
+}
+
+function toggleFavorite(id) {
+  if (store.favorites[id]) delete store.favorites[id];
+  else store.favorites[id] = { at: Date.now() };
+  persist();
+  render();
+}
+
+function markSubmitted(question, text, result) {
+  const id = question.id;
+  store.completed[id] = { at: Date.now(), score: result?.score ?? null };
+  store.answers[id] = { text, at: Date.now(), score: result?.score ?? null };
+  if (result && result.score < 60) store.mistakes[id] = { at: Date.now(), score: result.score };
+  else delete store.mistakes[id];
+  store.sessions.unshift({ date: today(), id, mode: question.mode });
+  store.sessions = store.sessions.slice(0, 1000);
+  persist();
+}
+
+function extractLimit(stem = '') {
+  const match = stem.match(/不超过\s*(\d+)\s*字|([0-9]+)\s*字/);
+  return Number(match?.[1] || match?.[2] || 0);
+}
+
+function localGrade(question, answer) {
+  const text = answer.trim();
+  const reference = question.answer || '';
+  const referencePoints = reference
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter((line) => /^\d+[.、]|^[一二三四五六七八九十]+、/.test(line));
+  const chunks = referencePoints.length ? referencePoints : reference.split(/[。；]/).filter((item) => item.trim().length > 8).slice(0, 8);
+  const matched = chunks.filter((chunk) => {
+    const keywords = [...new Set(chunk.match(/[\u4e00-\u9fff]{2,4}/g) || [])].filter((word) => word.length >= 2);
+    return keywords.filter((word) => text.includes(word)).length >= Math.max(1, Math.ceil(keywords.length * 0.18));
+  }).length;
+  const coverage = chunks.length ? matched / chunks.length : Math.min(1, text.length / 120);
+  const hasStructure = /\n|\d+[.、]|[一二三四五六七八九十]+、/.test(text);
+  const limit = extractLimit(question.stem);
+  const wordScore = !limit || text.length <= limit ? 1 : Math.max(0, 1 - (text.length - limit) / limit);
+  const score = Math.round(Math.max(0, Math.min(100, coverage * 65 + (hasStructure ? 15 : 5) + wordScore * 20)));
+  const missing = chunks.filter((chunk) => !text.includes(chunk.slice(0, 8))).slice(0, 3);
+  return {
+    score,
+    coverage: Math.round(coverage * 100),
+    words: text.length,
+    limit,
+    missing,
+    suggestions: [
+      coverage < 0.7 ? '先按参考答案的总括词拆成 3—5 条，避免只写感受或背景。' : '要点覆盖不错，可继续压缩同义表达，让每条更像评分点。',
+      !hasStructure ? '建议使用序号或分段呈现，阅卷时更容易识别要点。' : '条理已经清楚，检查各条是否互不交叉。',
+      limit && text.length > limit ? `当前约 ${text.length} 字，超过题目要求 ${limit} 字，需要删减。` : '完成后再对照材料核对主体、对象和逻辑关系。',
+    ],
+  };
+}
+
+function submitAnswer() {
+  const question = state.question;
+  if (!question) return;
+  if (question.mode === 'choice') {
+    state.submitted = true;
+    store.completed[question.id] = { at: Date.now(), score: null };
+    persist();
+    render();
+    showToast('已记录本题');
+    return;
+  }
+  if (!state.practiceText.trim()) {
+    showToast('先写下你的答案，再交卷');
+    document.querySelector('#answer-box')?.focus();
+    return;
+  }
+  const result = localGrade(question, state.practiceText);
+  state.submitted = true;
+  markSubmitted(question, state.practiceText, result);
+  render();
+}
+
+function resetAnswer() {
+  if (!state.question) return;
+  state.practiceText = '';
+  delete store.answers[state.question.id];
+  delete store.completed[state.question.id];
+  delete store.mistakes[state.question.id];
+  state.submitted = false;
+  state.aiResult = null;
+  persist();
+  render();
+}
+
+function nextQuestion() {
+  if (!state.queue.length) prepareQueue();
+  if (state.queueIndex < state.queue.length - 1) {
+    state.queueIndex += 1;
+    selectQuestion(state.queue[state.queueIndex].id);
+  } else {
+    showToast('这一轮已完成，可以换一组筛选继续');
+  }
+}
+
+function previousQuestion() {
+  if (state.queueIndex > 0) {
+    state.queueIndex -= 1;
+    selectQuestion(state.queue[state.queueIndex].id);
+  }
+}
+
+function buildPrompt(question, userAnswer, kind = 'score') {
+  const task = kind === 'explain'
+    ? '请解释这道选择题的正确答案，逐项说明选项为什么对或错。'
+    : '请像一名严格但建设性的申论阅卷老师一样评分，并给出可以直接执行的修改建议。';
+  return `${task}\n\n只根据题目材料和参考答案判断，不要编造材料中没有的事实。\n请使用中文，返回 JSON，不要 Markdown 代码围栏。\nJSON 字段：score(number, 0-100), summary(string), dimensions(array of {name, score, note}), missing(array of string), suggestions(array of string), rewrite(string)。\n\n题型：${question.questionType}\n题目：${question.stem}\n给定材料：${question.material}\n参考答案：${question.answer}\n学生作答：${userAnswer || '（选择题无需填写）'}`;
+}
+
+async function askModel(kind = 'score') {
+  if (!settings.aiEnabled) {
+    showToast('请先在设置中打开大模型辅助');
+    return;
+  }
+  if (!settings.apiKey.trim()) {
+    showToast('请先在设置中填写 OpenAI 兼容 API Key');
+    state.view = 'settings';
+    location.hash = 'settings';
+    render();
+    return;
+  }
+  state.aiLoading = true;
+  state.aiResult = null;
+  render();
+  try {
+    const endpoint = settings.endpoint.replace(/\/$/, '');
+    const response = await fetch(`${endpoint}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${settings.apiKey.trim()}` },
+      body: JSON.stringify({
+        model: settings.model.trim() || DEFAULT_SETTINGS.model,
+        temperature: 0.2,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: '你是公考题库的阅卷与学习教练。输出准确、克制、可执行。' },
+          { role: 'user', content: buildPrompt(state.question, state.practiceText, kind) },
+        ],
+      }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error?.message || `请求失败（${response.status}）`);
+    const content = payload.choices?.[0]?.message?.content || '';
+    state.aiResult = JSON.parse(content.replace(/^```json\s*|\s*```$/g, ''));
+  } catch (error) {
+    state.aiResult = { error: error.message || '模型请求失败，请检查地址、模型和 Key。' };
+  } finally {
+    state.aiLoading = false;
+    render();
+  }
+}
+
+function navItem(view, label, iconName, count = '') {
+  const active = state.view === view ? 'active' : '';
+  return `<button class="nav-item ${active}" data-action="navigate" data-view="${view}">${icon(iconName)}<span>${label}</span>${count ? `<b>${count}</b>` : ''}</button>`;
+}
+
+function renderShell(content) {
+  const c = counts();
+  app.innerHTML = `
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="主导航">
+        <div class="brand-lockup"><div class="brand-mark">墨</div><div><strong>墨卷</strong><span>公考练习工作台</span></div></div>
+        <div class="sidebar-rule"></div>
+        <p class="nav-label">我的书桌</p>
+        <nav>
+          ${navItem('desk', '今日书桌', 'notebook-pen')}
+          ${navItem('practice', '开始刷题', 'play-circle')}
+          ${navItem('mistakes', '错题回看', 'rotate-ccw', c.mistakes)}
+          ${navItem('favorites', '我的收藏', 'bookmark', c.favorites)}
+        </nav>
+        <p class="nav-label library-label">题库切换</p>
+        <div class="subject-switcher">
+          <button class="subject-tab ${state.filters.subject === '申论' ? 'selected' : ''}" data-action="subject" data-subject="申论"><span class="ink-dot red"></span>申论题库<em>${state.manifest?.questions.filter((q) => q.subject === '申论').length.toLocaleString() || 0}</em></button>
+          <button class="subject-tab ${state.filters.subject === '综应' ? 'selected' : ''}" data-action="subject" data-subject="综应"><span class="ink-dot blue"></span>综应题库<em>${state.manifest?.questions.filter((q) => q.subject === '综应').length.toLocaleString() || 0}</em></button>
+        </div>
+        <div class="sidebar-bottom"><div class="progress-stamp"><span>已完成</span><strong>${progressPercent()}%</strong><div class="progress-line"><i style="width:${progressPercent()}%"></i></div></div>${navItem('settings', '设置与模型', 'sliders-horizontal')}</div>
+      </aside>
+      <main class="main-area">
+        <header class="topbar"><div class="mobile-brand"><span class="brand-mark">墨</span><strong>墨卷</strong></div><div class="topbar-note"><span class="tiny-pencil">✎</span> 今天也写一题，进步就有形状</div><div class="top-actions"><button class="icon-button" data-action="navigate" data-view="settings" title="设置">${icon('settings-2')}</button><button class="avatar-button" data-action="navigate" data-view="desk" title="回到书桌">林</button></div></header>
+        <div class="page-content">${content}</div>
+      </main>
+    </div>
+    ${state.toast ? `<div class="toast" role="status">${icon('check-circle-2')}${escapeHtml(state.toast)}</div>` : ''}
+  `;
+  hydrateIcons();
+}
+
+function renderDesk() {
+  const c = counts();
+  const recommendations = (state.manifest?.questions || []).filter((q) => !store.completed[q.id]).slice(0, 3);
+  const recent = Object.entries(store.answers).sort((a, b) => b[1].at - a[1].at).slice(0, 3).map(([id]) => state.manifest.questions.find((q) => q.id === id)).filter(Boolean);
+  return `
+    <section class="desk-intro reveal"><div><p class="eyebrow">${today()} / 学习记录</p><h1>把今天的答案，<br><span>写在纸上。</span></h1><p class="intro-copy">这是你的公考练习桌。先做一题，再看解析；把不熟的地方标出来，下一次就知道从哪里开始。</p></div><div class="desk-sketch" aria-hidden="true"><div class="sketch-circle"></div><div class="sketch-pencil">✎</div><span>今天的<br>一小步</span></div></section>
+    <section class="stat-strip reveal delay-1"><div class="stat-cell"><span>题库总量</span><strong>${c.total.toLocaleString()}</strong><small>道真题</small></div><div class="stat-cell"><span>今日完成</span><strong>${c.today}</strong><small>道练习</small></div><div class="stat-cell"><span>已收藏</span><strong>${c.favorites}</strong><small>道重点</small></div><div class="stat-cell accent"><span>完成进度</span><strong>${progressPercent()}<i>%</i></strong><small>持续积累中</small></div></section>
+    <section class="desk-grid reveal delay-2"><div class="section-heading"><div><p class="eyebrow">练习入口</p><h2>今天从哪里开始？</h2></div><button class="text-button" data-action="navigate" data-view="practice">浏览全部 ${icon('arrow-up-right')}</button></div><div class="launch-grid"><button class="launch-card red-card" data-action="quick-start" data-subject="申论"><span class="card-ink">01</span><span class="launch-icon">${icon('pen-line')}</span><strong>申论题库</strong><small>材料阅读 · 要点提炼 · 文章写作</small><i class="launch-arrow">${icon('arrow-up-right')}</i></button><button class="launch-card blue-card" data-action="quick-start" data-subject="综应"><span class="card-ink">02</span><span class="launch-icon">${icon('layers-3')}</span><strong>综应题库</strong><small>案例分析 · 公文处理 · 科技实务</small><i class="launch-arrow">${icon('arrow-up-right')}</i></button><button class="launch-card pale-card" data-action="quick-start" data-mode="subjective"><span class="card-ink">03</span><span class="launch-icon">${icon('message-square-more')}</span><strong>主观题专场</strong><small>写完即评 · 看见自己的进步</small><i class="launch-arrow">${icon('arrow-up-right')}</i></button></div></section>
+    <section class="desk-lower reveal delay-3"><div class="recommendation"><div class="section-heading"><div><p class="eyebrow">为你挑选</p><h2>下一题</h2></div><span class="hand-note">不重复已完成</span></div>${recommendations.length ? recommendations.map((q, i) => questionRow(q, i)).join('') : `<div class="empty-state">${icon('check-check')}<p>这一轮题目都完成了。</p><button class="outline-button" data-action="navigate" data-view="practice">换一组题</button></div>`}</div><div class="recent-note"><div class="section-heading"><div><p class="eyebrow">最近落笔</p><h2>练习痕迹</h2></div></div>${recent.length ? recent.map((q) => `<button class="recent-row" data-action="open-question" data-id="${q.id}"><span>${escapeHtml(q.subject)} · ${escapeHtml(q.category)}</span><strong>${escapeHtml(q.title.replace(/^请根据[““]?给定资料[””]?[,，]?/, '').slice(0, 34))}</strong><i>${icon('chevron-right')}</i></button>`).join('') : '<p class="muted empty-copy">完成第一道题后，这里会留下你的练习痕迹。</p>'}</div></section>
+  `;
+}
+
+function questionRow(question, index = 0) {
+  return `<button class="question-row" data-action="open-question" data-id="${question.id}"><span class="row-number">${String(index + 1).padStart(2, '0')}</span><span class="row-main"><small>${escapeHtml(question.subject)} / ${escapeHtml(question.category)}</small><strong>${escapeHtml(question.title.slice(0, 58))}</strong></span><span class="row-meta">${question.difficulty ? '难度 ' + '●'.repeat(question.difficulty) : '未标注'} ${icon('arrow-up-right')}</span></button>`;
+}
+
+function filterBar() {
+  return `<div class="filter-bar"><label class="search-field">${icon('search')}<input data-input="search" value="${escapeHtml(state.filters.search)}" placeholder="搜题干、题型或主题" /></label><select data-input="subject"><option>全部</option><option ${state.filters.subject === '申论' ? 'selected' : ''}>申论</option><option ${state.filters.subject === '综应' ? 'selected' : ''}>综应</option></select><select data-input="category"><option>全部</option>${categories().map((category) => `<option ${state.filters.category === category ? 'selected' : ''}>${escapeHtml(category)}</option>`).join('')}</select><select data-input="mode"><option value="全部">全部形式</option><option value="subjective" ${state.filters.mode === 'subjective' ? 'selected' : ''}>主观题</option><option value="choice" ${state.filters.mode === 'choice' ? 'selected' : ''}>选择题</option></select></div>`;
+}
+
+function renderPractice() {
+  const list = filteredQuestions();
+  if (!state.question && !state.questionLoading && list.length) {
+    prepareQueue(list);
+    queueMicrotask(() => loadQuestion(list[0].id));
+  }
+  const question = state.question;
+  const result = question && state.submitted && question.mode === 'subjective' ? localGrade(question, state.practiceText) : null;
+  return `<section class="practice-layout reveal"><div class="practice-main"><div class="practice-heading"><div><p class="eyebrow">练习模式 / ${list.length.toLocaleString()} 道匹配题</p><h1>落笔，才算真正读懂。</h1></div><button class="outline-button" data-action="navigate" data-view="desk">${icon('arrow-left')} 回到书桌</button></div>${filterBar()}${state.questionLoading || !question ? loadingCard() : practiceCard(question, result)}</div><aside class="practice-aside"><div class="aside-sticky"><div class="aside-title"><span class="page-corner"></span><div><p class="eyebrow">本轮进度</p><h3>${state.queueIndex + 1} <small>/ ${state.queue.length || list.length || 0}</small></h3></div></div><div class="vertical-progress"><i style="height:${state.queue.length ? ((state.queueIndex + 1) / state.queue.length) * 100 : 0}%"></i></div><p class="aside-caption">每一道题都算数。<br>完成后会自动留下记录。</p><div class="aside-list">${state.queue.slice(Math.max(0, state.queueIndex - 1), state.queueIndex + 3).map((item, i) => `<button class="aside-question ${item.id === question?.id ? 'current' : ''}" data-action="open-question" data-id="${item.id}"><span>${String(state.queue.indexOf(item) + 1).padStart(2, '0')}</span><strong>${escapeHtml(item.title.slice(0, 24))}</strong></button>`).join('')}</div></div></aside></section>`;
+}
+
+function loadingCard() {
+  return `<div class="loading-card"><div class="scribble-loader">${icon('loader-circle')}</div><p>正在翻开这一页...</p></div>`;
+}
+
+function practiceCard(question, result) {
+  const isFavorite = Boolean(store.favorites[question.id]);
+  const options = question.options || [];
+  return `<article class="question-paper"><div class="paper-topline"><span>${escapeHtml(question.subject)} / ${escapeHtml(question.category)}</span><div><span class="paper-id">#${escapeHtml(question.id)}</span><button class="icon-button small ${isFavorite ? 'is-favorite' : ''}" data-action="favorite" title="${isFavorite ? '取消收藏' : '收藏'}">${icon('bookmark')}</button></div></div><div class="question-title-row"><div class="question-number">${String(state.queueIndex + 1).padStart(2, '0')}</div><div><h2>${escapeHtml(question.title)}</h2><div class="question-tags">${question.detailType ? `<span>${escapeHtml(question.detailType)}</span>` : ''}${question.themes?.slice(0, 2).map((theme) => `<span>${escapeHtml(theme)}</span>`).join('') || ''}</div></div></div><div class="material-section"><div class="section-label"><span>给定材料</span><i></i><small>${question.material ? `${question.material.length.toLocaleString()} 字` : '题干阅读'}</small></div><div class="material-copy">${formatText(question.material || question.stem)}</div></div><div class="answer-section"><div class="section-label"><span>你的作答</span><i></i><small>${question.mode === 'choice' ? '选择一个答案' : `${extractLimit(question.stem) ? `限 ${extractLimit(question.stem)} 字` : '不限字数'}`}</small></div>${options.length ? choiceInput(question, options) : `<textarea id="answer-box" data-input="answer" ${state.submitted ? 'readonly' : ''} placeholder="从材料中提炼要点，写下你的答案...">${escapeHtml(state.practiceText)}</textarea><div class="answer-tools"><span>${state.practiceText.length} 字</span><button class="ghost-button" data-action="clear-answer" ${state.submitted ? 'disabled' : ''}>清空</button></div>`}</div>${state.submitted ? resultPanel(question, result) : ''}<div class="paper-actions"><button class="secondary-button" data-action="previous" ${state.queueIndex <= 0 ? 'disabled' : ''}>${icon('arrow-left')} 上一题</button><div class="primary-actions">${question.mode === 'choice' && settings.aiEnabled ? `<button class="ai-button" data-action="ask-ai-explain" ${state.aiLoading ? 'disabled' : ''}>${icon('sparkles')} ${state.aiLoading ? '解析中...' : '大模型解析'}</button>` : ''}<button class="submit-button" data-action="submit" ${state.submitted ? 'disabled' : ''}>${state.submitted ? icon('check') + ' 已完成' : '交卷并查看解析'}</button></div><button class="secondary-button" data-action="next">下一题 ${icon('arrow-right')}</button></div></article>`;
+}
+
+function choiceInput(question, options) {
+  const selected = store.answers[question.id]?.choice || '';
+  return `<div class="choice-list">${options.map((option) => `<label class="choice-option ${selected === option.key ? 'selected' : ''}"><input type="radio" name="choice" value="${option.key}" ${selected === option.key ? 'checked' : ''} ${state.submitted ? 'disabled' : ''}/><span class="choice-key">${option.key}</span><span>${escapeHtml(option.text)}</span></label>`).join('')}</div>`;
+}
+
+function resultPanel(question, result) {
+  if (question.mode === 'choice') {
+    return `<div class="result-panel choice-result"><div class="result-heading"><span class="result-badge">参考解析</span><h3>答案与思路</h3></div><div class="reference-copy">${formatText(question.answer)}</div><button class="ai-text-button" data-action="ask-ai-explain" ${state.aiLoading ? 'disabled' : ''}>${icon('sparkles')} ${state.aiLoading ? '正在请教模型...' : '让大模型补充一版解析'}</button>${aiResultPanel()}</div>`;
+  }
+  return `<div class="result-panel"><div class="score-head"><div><span class="result-badge">本次自评</span><strong>${result?.score ?? '--'}<small>/100</small></strong></div><div class="score-caption">${result?.coverage ?? 0}% 要点覆盖<br><span>${result?.words ?? 0}${result?.limit ? ` / ${result.limit}` : ''} 字</span></div></div><div class="score-bars">${scoreBar('要点覆盖', result?.coverage ?? 0, '#df6658')}${scoreBar('结构条理', result && /\n|\d+[.、]|[一二三四五六七八九十]+、/.test(state.practiceText) ? 88 : 48, '#527f95')}${scoreBar('字数控制', result?.limit && result.words > result.limit ? Math.max(10, Math.round((result.limit / result.words) * 100)) : 100, '#e6ad4d')}</div><div class="suggestion-block"><h4>落笔建议</h4><ul>${(result?.suggestions || []).map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul></div><div class="reference-fold"><button class="reference-toggle" data-action="toggle-reference">${state.loadedAnswer ? '收起参考答案与演示' : '展开参考答案与演示'} ${icon(state.loadedAnswer ? 'chevron-up' : 'chevron-down')}</button>${state.loadedAnswer ? `<div class="reference-copy"><h4>参考答案</h4>${formatText(question.answer)}<h4>答题演示</h4>${formatText(question.demo)}</div>` : ''}</div><div class="ai-coach-row"><span>${icon('sparkles')} 想要更细的语义反馈？</span><button class="ai-text-button" data-action="ask-ai-score" ${state.aiLoading ? 'disabled' : ''}>${state.aiLoading ? '正在请教模型...' : '请大模型点评'} ${icon('arrow-up-right')}</button></div>${aiResultPanel()}</div>`;
+}
+
+function scoreBar(label, value, color) {
+  return `<div class="score-bar"><div><span>${label}</span><strong>${value}%</strong></div><div class="bar-track"><i style="width:${value}%;background:${color}"></i></div></div>`;
+}
+
+function aiResultPanel() {
+  if (!state.aiResult) return '';
+  if (state.aiResult.error) return `<div class="ai-result error-result">${icon('triangle-alert')}<p>${escapeHtml(state.aiResult.error)}</p></div>`;
+  return `<div class="ai-result"><div class="ai-result-title">${icon('sparkles')} 模型点评 <span>${state.aiResult.score ?? '--'} 分</span></div>${state.aiResult.summary ? `<p>${escapeHtml(state.aiResult.summary)}</p>` : ''}${state.aiResult.dimensions?.length ? `<div class="ai-dimensions">${state.aiResult.dimensions.map((item) => `<div><span>${escapeHtml(item.name)}</span><strong>${escapeHtml(item.score)}</strong><small>${escapeHtml(item.note)}</small></div>`).join('')}</div>` : ''}${state.aiResult.missing?.length ? `<div class="ai-list"><b>可能遗漏</b><ul>${state.aiResult.missing.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul></div>` : ''}${state.aiResult.suggestions?.length ? `<div class="ai-list"><b>优化建议</b><ul>${state.aiResult.suggestions.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul></div>` : ''}${state.aiResult.rewrite ? `<div class="rewrite-box"><b>参考改写</b><p>${escapeHtml(state.aiResult.rewrite)}</p></div>` : ''}</div>`;
+}
+
+function renderLibrary(view) {
+  const title = view === 'mistakes' ? '错题回看' : '我的收藏';
+  const ids = Object.keys(view === 'mistakes' ? store.mistakes : store.favorites);
+  const questions = ids.map((id) => state.manifest.questions.find((q) => q.id === id)).filter(Boolean);
+  return `<section class="library-page reveal"><div class="library-heading"><div><p class="eyebrow">${view === 'mistakes' ? '需要再看一眼' : '留给下次的标记'}</p><h1>${title}</h1><p>${questions.length ? `共 ${questions.length} 道，按最近标记排序。` : '这里还没有题目。'}</p></div><button class="outline-button" data-action="navigate" data-view="practice">${icon('plus')} 去刷一题</button></div><div class="library-list">${questions.length ? questions.map((q, i) => questionRow(q, i)).join('') : `<div class="empty-library"><div class="empty-mark">${view === 'mistakes' ? '再' : '藏'}</div><h3>${view === 'mistakes' ? '还没有错题记录' : '收藏夹是空的'}</h3><p>${view === 'mistakes' ? '完成练习后，低分题会自动出现在这里。' : '在题目右上角点一下书签，留下你想反复看的题。'}</p></div>`}</div></section>`;
+}
+
+function renderSettings() {
+  return `<section class="settings-page reveal"><div class="settings-heading"><div><p class="eyebrow">工具箱 / 本地保存</p><h1>让工具，<br>听你的。</h1><p>设置只保存在当前浏览器。API Key 不会写入题库文件。</p></div><div class="settings-doodle">${icon('key-round')}<span>可选<br>增强</span></div></div><div class="settings-grid"><form class="settings-form" data-form="settings"><div class="form-section"><div class="form-section-heading"><span>01</span><div><h3>大模型连接</h3><p>支持 OpenAI 格式的 /chat/completions 接口。</p></div></div><label>接口地址<input name="endpoint" value="${escapeHtml(settings.endpoint)}" placeholder="https://api.openai.com/v1" /></label><label>模型名称<input name="model" value="${escapeHtml(settings.model)}" placeholder="gpt-4o-mini" /></label><label>API Key<input name="apiKey" type="password" value="${escapeHtml(settings.apiKey)}" placeholder="sk-..." autocomplete="off" /></label><label class="switch-line"><span><strong>启用大模型辅助</strong><small>主观题评分、选择题解析都会出现入口</small></span><input name="aiEnabled" type="checkbox" ${settings.aiEnabled ? 'checked' : ''}/><i class="toggle-ui"></i></label><button class="submit-button save-settings" type="submit">${icon('save')} 保存设置</button></div><div class="form-section"><div class="form-section-heading"><span>02</span><div><h3>练习偏好</h3><p>这些偏好只影响当前设备上的工作台。</p></div></div><label class="switch-line"><span><strong>交卷后自动显示自评</strong><small>基于参考答案的离线要点匹配</small></span><input type="checkbox" checked disabled/><i class="toggle-ui"></i></label><label class="switch-line"><span><strong>保留答案草稿</strong><small>切换题目后保留已写内容</small></span><input type="checkbox" checked disabled/><i class="toggle-ui"></i></label></div></form><aside class="settings-notes"><div class="note-paper"><span class="tape"></span><h3>使用小贴士</h3><p>1. 先保存设置，再回到题目页。</p><p>2. 接口地址填到版本根路径，例如 https://api.openai.com/v1。</p><p>3. 如果服务商不支持 JSON 模式，模型仍可能返回文本，请换用支持 OpenAI 格式的模型。</p><p>4. 没有 Key 也能使用离线自评和完整题库。</p></div><div class="data-note"><span>数据状态</span><strong>${state.manifest?.total.toLocaleString()} 道题已就绪</strong><small>由 Markdown 题库构建 · ${state.manifest?.generatedAt ? new Date(state.manifest.generatedAt).toLocaleDateString('zh-CN') : '本地'}</small></div></aside></div></section>`;
+}
+
+function render() {
+  if (!state.manifest) return;
+  let content;
+  if (state.view === 'practice') content = renderPractice();
+  else if (state.view === 'mistakes' || state.view === 'favorites') content = renderLibrary(state.view);
+  else if (state.view === 'settings') content = renderSettings();
+  else content = renderDesk();
+  renderShell(content);
+}
+
+function handleAction(target) {
+  const action = target.dataset.action;
+  if (action === 'navigate') {
+    state.view = target.dataset.view;
+    location.hash = state.view;
+    if (state.view === 'practice') prepareQueue(filteredQuestions());
+    render();
+  } else if (action === 'subject') {
+    state.filters.subject = state.filters.subject === target.dataset.subject ? '全部' : target.dataset.subject;
+    state.filters.category = '全部';
+    state.view = 'practice';
+    location.hash = 'practice';
+    prepareQueue(filteredQuestions());
+    render();
+  } else if (action === 'quick-start') {
+    state.filters.subject = target.dataset.subject || '全部';
+    state.filters.mode = target.dataset.mode || '全部';
+    state.filters.category = '全部';
+    state.filters.search = '';
+    state.view = 'practice';
+    location.hash = 'practice';
+    state.queue = filteredQuestions();
+    state.queueIndex = 0;
+    render();
+    loadQuestion(state.queue[0]?.id);
+  } else if (action === 'open-question') {
+    const item = state.manifest.questions.find((q) => q.id === target.dataset.id);
+    state.queue = filteredQuestions();
+    state.queueIndex = Math.max(0, state.queue.findIndex((q) => q.id === target.dataset.id));
+    state.view = 'practice';
+    location.hash = 'practice';
+    loadQuestion(item?.id || target.dataset.id);
+  } else if (action === 'favorite') toggleFavorite(state.question?.id);
+  else if (action === 'submit') submitAnswer();
+  else if (action === 'clear-answer') resetAnswer();
+  else if (action === 'next') nextQuestion();
+  else if (action === 'previous') previousQuestion();
+  else if (action === 'toggle-reference') { state.loadedAnswer = !state.loadedAnswer; render(); }
+  else if (action === 'ask-ai-score') askModel('score');
+  else if (action === 'ask-ai-explain') askModel('explain');
+}
+
+app.addEventListener('click', (event) => {
+  const target = event.target.closest('[data-action]');
+  if (target) handleAction(target);
+});
+
+app.addEventListener('input', (event) => {
+  const input = event.target;
+  if (input.dataset.input === 'answer') {
+    state.practiceText = input.value;
+    const counter = input.closest('.answer-section')?.querySelector('.answer-tools span');
+    if (counter) counter.textContent = `${input.value.length} 字`;
+  } else if (input.dataset.input === 'search') {
+    state.filters.search = input.value;
+    prepareQueue(filteredQuestions());
+    render();
+  }
+});
+
+app.addEventListener('change', (event) => {
+  const input = event.target;
+  if (input.dataset.input === 'subject' || input.dataset.input === 'category' || input.dataset.input === 'mode') {
+    state.filters[input.dataset.input] = input.value;
+    prepareQueue(filteredQuestions());
+    state.question = null;
+    render();
+    return;
+  }
+  if (input.name === 'choice' && state.question) {
+    store.answers[state.question.id] = { choice: input.value, at: Date.now() };
+    persist();
+    input.closest('.choice-list')?.querySelectorAll('.choice-option').forEach((item) => item.classList.remove('selected'));
+    input.closest('.choice-option')?.classList.add('selected');
+  }
+});
+
+app.addEventListener('submit', (event) => {
+  const form = event.target.closest('[data-form="settings"]');
+  if (!form) return;
+  event.preventDefault();
+  const data = new FormData(form);
+  settings = {
+    endpoint: String(data.get('endpoint') || DEFAULT_SETTINGS.endpoint).trim(),
+    model: String(data.get('model') || DEFAULT_SETTINGS.model).trim(),
+    apiKey: String(data.get('apiKey') || '').trim(),
+    aiEnabled: data.get('aiEnabled') === 'on',
+  };
+  persistSettings();
+  showToast('设置已保存在本机');
+});
+
+window.addEventListener('hashchange', () => {
+  const view = location.hash.replace('#', '') || 'desk';
+  state.view = view;
+  render();
+});
+
+async function bootstrap() {
+  await loadManifest();
+  render();
+}
+
+bootstrap();

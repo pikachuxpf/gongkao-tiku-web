@@ -1,0 +1,21 @@
+{
+  "name": "gongkao-tiku-studio",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "predev": "npm run build:data",
+    "dev": "vite",
+    "build:data": "node scripts/build-data.mjs",
+    "build": "npm run build:data && vite build",
+    "preview": "vite preview",
+    "pretest": "npm run build:data",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "lucide": "^0.468.0"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0"
+  }
+}
