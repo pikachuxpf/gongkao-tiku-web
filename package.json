@@ -3,9 +3,11 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "scripts": {
-    "predev": "npm run build:data",
-    "dev": "vite",
+    "dev": "node scripts/ensure-data.mjs && node scripts/serve-local.mjs",
     "build:data": "node scripts/build-data.mjs",
     "build": "npm run build:data && vite build",
     "preview": "vite preview",

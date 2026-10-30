@@ -15,6 +15,10 @@ const state = {
   manifest: null,
   question: null,
   questionLoading: false,
+  summaryLoading: false,
+  detailChunks: new Map(),
+  summaries: new Map(),
+  summaryPromises: new Map(),
   view: location.hash.replace('#', '') || 'desk',
   filters: { subject: '全部', category: '全部', mode: '全部', search: '' },
   queue: [],
@@ -25,6 +29,7 @@ const state = {
   aiResult: null,
   toast: '',
   practiceText: '',
+  storage: 'browser',
 };
 
 const store = loadJson(STORAGE_KEY, {
@@ -35,6 +40,9 @@ const store = loadJson(STORAGE_KEY, {
   sessions: [],
 });
 let settings = { ...DEFAULT_SETTINGS, ...loadJson(SETTINGS_KEY, {}) };
+let storageSyncTimer = null;
+let storageSyncInFlight = false;
+let storageSyncPending = false;
 
 function loadJson(key, fallback) {
   try {
@@ -46,6 +54,88 @@ function loadJson(key, fallback) {
 
 function persist() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+  if (state.storage === 'sqlite') scheduleStorageSync();
+}
+
+function snapshotHasData(snapshot) {
+  return ['completed', 'favorites', 'mistakes', 'answers', 'sessions']
+    .some((key) => Object.keys(snapshot?.[key] || {}).length || (snapshot?.[key] || []).length);
+}
+
+function mergeStorageState(localState, remoteState) {
+  const merged = {
+    completed: { ...(remoteState?.completed || {}) },
+    favorites: { ...(remoteState?.favorites || {}) },
+    mistakes: { ...(remoteState?.mistakes || {}) },
+    answers: { ...(remoteState?.answers || {}) },
+    sessions: [...(remoteState?.sessions || [])],
+  };
+  for (const key of ['completed', 'favorites', 'mistakes', 'answers']) {
+    for (const [id, value] of Object.entries(localState?.[key] || {})) {
+      const current = merged[key][id];
+      if (!current || Number(value?.at || 0) >= Number(current?.at || 0)) merged[key][id] = value;
+    }
+  }
+  const sessions = [...merged.sessions, ...(localState?.sessions || [])];
+  merged.sessions = [...new Map(sessions.map((item) => [`${item.date}|${item.id}|${item.mode}`, item])).values()]
+    .sort((a, b) => String(b.date).localeCompare(String(a.date)))
+    .slice(0, 1000);
+  return merged;
+}
+
+function applyStorageState(nextState) {
+  for (const key of ['completed', 'favorites', 'mistakes', 'answers', 'sessions']) {
+    if (key === 'sessions') store[key] = Array.isArray(nextState?.[key]) ? nextState[key] : [];
+    else {
+      store[key] = nextState?.[key] && typeof nextState[key] === 'object' ? nextState[key] : {};
+    }
+  }
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+}
+
+function scheduleStorageSync() {
+  storageSyncPending = true;
+  window.clearTimeout(storageSyncTimer);
+  storageSyncTimer = window.setTimeout(syncStorage, 250);
+}
+
+async function syncStorage() {
+  if (state.storage !== 'sqlite' || storageSyncInFlight || !storageSyncPending) return;
+  storageSyncInFlight = true;
+  storageSyncPending = false;
+  try {
+    const response = await fetch('/api/state', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(store),
+    });
+    if (!response.ok) throw new Error('SQLite 状态保存失败');
+  } catch {
+    state.storage = 'browser';
+    showToast('后端暂时不可用，已切换到浏览器保存');
+  } finally {
+    storageSyncInFlight = false;
+    if (storageSyncPending) scheduleStorageSync();
+  }
+}
+
+async function initPersistence() {
+  try {
+    const response = await fetch('/api/state', { cache: 'no-store' });
+    if (!response.ok) throw new Error('SQLite 状态读取失败');
+    const payload = await response.json();
+    const remoteState = payload.state || {};
+    const localState = JSON.parse(JSON.stringify(store));
+    if (snapshotHasData(remoteState)) applyStorageState(mergeStorageState(localState, remoteState));
+    else if (snapshotHasData(localState)) {
+      state.storage = 'sqlite';
+      scheduleStorageSync();
+      return;
+    } else applyStorageState(remoteState);
+    state.storage = 'sqlite';
+  } catch {
+    state.storage = 'browser';
+  }
 }
 
 function persistSettings() {
@@ -142,19 +232,53 @@ function showToast(message) {
 
 function categories() {
   const subject = state.filters.subject;
-  return [...new Set((state.manifest?.questions || [])
+  return [...new Set(loadedQuestions()
     .filter((item) => subject === '全部' || item.subject === subject)
     .map((item) => item.category))]
     .sort((a, b) => a.localeCompare(b, 'zh-CN'));
 }
 
 function subjectCount(subject) {
-  return (state.manifest?.questions || []).filter((question) => question.subject === subject).length;
+  return state.manifest?.subjectCounts?.[subject] || 0;
+}
+
+function loadedQuestions() {
+  return [...state.summaries.values()].flatMap((summary) => summary.questions || []);
+}
+
+async function loadSummaries(subject = '全部') {
+  if (!state.manifest?.summaryFiles) return;
+  const subjects = subject === '全部' ? state.manifest.subjects : [subject];
+  const missing = subjects.filter((item) => !state.summaries.has(item) && !state.summaryPromises.has(item));
+  if (!missing.length) return;
+  state.summaryLoading = true;
+  render();
+  try {
+    await Promise.all(missing.map(async (item) => {
+      const promise = fetch(`/data/${state.manifest.summaryFiles[item]}`)
+        .then((response) => {
+          if (!response.ok) throw new Error(`题库摘要加载失败（${response.status}）`);
+          return response.json();
+        })
+        .then((summary) => state.summaries.set(item, summary));
+      state.summaryPromises.set(item, promise);
+      try {
+        await promise;
+      } finally {
+        state.summaryPromises.delete(item);
+      }
+    }));
+  } catch (error) {
+    showToast(error.message || '题库摘要加载失败');
+  } finally {
+    state.summaryLoading = false;
+    render();
+  }
 }
 
 function filteredQuestions() {
   const search = state.filters.search.trim().toLowerCase();
-  return (state.manifest?.questions || []).filter((item) => {
+  return loadedQuestions().filter((item) => {
     const categoryMatch = state.filters.category === '全部' || item.category === state.filters.category;
     const subjectMatch = state.filters.subject === '全部' || item.subject === state.filters.subject;
     const modeMatch = state.filters.mode === '全部' || item.mode === state.filters.mode;
@@ -164,9 +288,8 @@ function filteredQuestions() {
 }
 
 function counts() {
-  const questions = state.manifest?.questions || [];
   return {
-    total: questions.length,
+    total: state.manifest?.total || 0,
     completed: Object.keys(store.completed).length,
     favorites: Object.keys(store.favorites).length,
     mistakes: Object.keys(store.mistakes).length,
@@ -199,14 +322,29 @@ async function loadQuestion(id) {
   if (!id) return;
   state.questionLoading = true;
   render();
-  const response = await fetch(`/data/questions/${encodeURIComponent(id)}.json`);
-  state.question = await response.json();
-  state.questionLoading = false;
-  state.loadedAnswer = false;
-  state.submitted = Boolean(store.completed[id]);
-  state.aiResult = null;
-  state.practiceText = store.answers[id]?.text || '';
-  render();
+  try {
+    const summary = loadedQuestions().find((item) => item.id === id);
+    if (!summary?.detailChunk) throw new Error('题目详情索引缺失');
+    let chunk = state.detailChunks.get(summary.detailChunk);
+    if (!chunk) {
+      const response = await fetch(`/data/${summary.detailChunk}`);
+      if (!response.ok) throw new Error(`题目详情加载失败（${response.status}）`);
+      chunk = await response.json();
+      state.detailChunks.set(summary.detailChunk, chunk);
+    }
+    const question = chunk.questions?.[id];
+    if (!question) throw new Error('题目详情不存在，请重新构建题库');
+    state.question = question;
+    state.loadedAnswer = false;
+    state.submitted = Boolean(store.completed[id]);
+    state.aiResult = null;
+    state.practiceText = store.answers[id]?.text || '';
+  } catch (error) {
+    showToast(error.message || '题目详情加载失败');
+  } finally {
+    state.questionLoading = false;
+    render();
+  }
 }
 
 function selectQuestion(id) {
@@ -442,13 +580,14 @@ function renderShell(content) {
 
 function renderDesk() {
   const c = counts();
-  const recommendations = (state.manifest?.questions || []).filter((q) => !store.completed[q.id]).slice(0, 3);
-  const recent = Object.entries(store.answers).sort((a, b) => b[1].at - a[1].at).slice(0, 3).map(([id]) => state.manifest.questions.find((q) => q.id === id)).filter(Boolean);
+  const loaded = loadedQuestions();
+  const recommendations = loaded.filter((q) => !store.completed[q.id]).slice(0, 3);
+  const recent = Object.entries(store.answers).sort((a, b) => b[1].at - a[1].at).slice(0, 3).map(([id]) => loaded.find((q) => q.id === id)).filter(Boolean);
   return `
     <section class="desk-intro reveal"><div><p class="eyebrow">${today()} / 学习记录</p><h1>把今天的答案，<br><span>写在纸上。</span></h1><p class="intro-copy">这是你的公考练习桌。先做一题，再看解析；把不熟的地方标出来，下一次就知道从哪里开始。</p></div><div class="desk-sketch" aria-hidden="true"><div class="sketch-circle"></div><div class="sketch-pencil">✎</div><span>今天的<br>一小步</span></div></section>
     <section class="stat-strip reveal delay-1"><div class="stat-cell"><span>题库总量</span><strong>${c.total.toLocaleString()}</strong><small>道真题</small></div><div class="stat-cell"><span>今日完成</span><strong>${c.today}</strong><small>道练习</small></div><div class="stat-cell"><span>已收藏</span><strong>${c.favorites}</strong><small>道重点</small></div><div class="stat-cell accent"><span>完成进度</span><strong>${progressPercent()}<i>%</i></strong><small>持续积累中</small></div></section>
     <section class="desk-grid reveal delay-2"><div class="section-heading"><div><p class="eyebrow">练习入口</p><h2>今天从哪里开始？</h2></div><button class="text-button" data-action="navigate" data-view="practice">浏览全部 ${icon('arrow-up-right')}</button></div><div class="launch-grid"><button class="launch-card red-card" data-action="quick-start" data-subject="申论"><span class="card-ink">01</span><span class="launch-icon">${icon('pen-line')}</span><strong>申论题库</strong><small>材料阅读 · 要点提炼 · 文章写作</small><i class="launch-arrow">${icon('arrow-up-right')}</i></button><button class="launch-card blue-card" data-action="quick-start" data-subject="综应"><span class="card-ink">02</span><span class="launch-icon">${icon('layers-3')}</span><strong>综应题库</strong><small>案例分析 · 公文处理 · 科技实务</small><i class="launch-arrow">${icon('arrow-up-right')}</i></button><button class="launch-card yellow-card" data-action="quick-start" data-subject="行测"><span class="card-ink">03</span><span class="launch-icon">${icon('scan-search')}</span><strong>行测题库</strong><small>六大模块 · 真题解析 · 图题支持</small><i class="launch-arrow">${icon('arrow-up-right')}</i></button><button class="launch-card green-card" data-action="quick-start" data-subject="公基"><span class="card-ink">04</span><span class="launch-icon">${icon('landmark')}</span><strong>事业编公基</strong><small>政治理论 · 常识判断 · 逐题解析</small><i class="launch-arrow">${icon('arrow-up-right')}</i></button><button class="launch-card pale-card" data-action="quick-start" data-mode="subjective"><span class="card-ink">05</span><span class="launch-icon">${icon('message-square-more')}</span><strong>主观题专场</strong><small>写完即评 · 看见自己的进步</small><i class="launch-arrow">${icon('arrow-up-right')}</i></button></div></section>
-    <section class="desk-lower reveal delay-3"><div class="recommendation"><div class="section-heading"><div><p class="eyebrow">为你挑选</p><h2>下一题</h2></div><span class="hand-note">不重复已完成</span></div>${recommendations.length ? recommendations.map((q, i) => questionRow(q, i)).join('') : `<div class="empty-state">${icon('check-check')}<p>这一轮题目都完成了。</p><button class="outline-button" data-action="navigate" data-view="practice">换一组题</button></div>`}</div><div class="recent-note"><div class="section-heading"><div><p class="eyebrow">最近落笔</p><h2>练习痕迹</h2></div></div>${recent.length ? recent.map((q) => `<button class="recent-row" data-action="open-question" data-id="${q.id}"><span>${escapeHtml(q.subject)} · ${escapeHtml(q.category)}</span><strong>${escapeHtml(q.title.replace(/^请根据[““]?给定资料[””]?[,，]?/, '').slice(0, 34))}</strong><i>${icon('chevron-right')}</i></button>`).join('') : '<p class="muted empty-copy">完成第一道题后，这里会留下你的练习痕迹。</p>'}</div></section>
+    <section class="desk-lower reveal delay-3"><div class="recommendation"><div class="section-heading"><div><p class="eyebrow">为你挑选</p><h2>下一题</h2></div><span class="hand-note">不重复已完成</span></div>${recommendations.length ? recommendations.map((q, i) => questionRow(q, i)).join('') : `<div class="empty-state">${icon('book-open')}<p>从上面的题库入口选择一门，马上开始。</p><button class="outline-button" data-action="quick-start" data-subject="公基">开始刷题</button></div>`}</div><div class="recent-note"><div class="section-heading"><div><p class="eyebrow">最近落笔</p><h2>练习痕迹</h2></div></div>${recent.length ? recent.map((q) => `<button class="recent-row" data-action="open-question" data-id="${q.id}"><span>${escapeHtml(q.subject)} · ${escapeHtml(q.category)}</span><strong>${escapeHtml(q.title.replace(/^请根据[““]?给定资料[””]?[,，]?/, '').slice(0, 34))}</strong><i>${icon('chevron-right')}</i></button>`).join('') : '<p class="muted empty-copy">完成第一道题后，这里会留下你的练习痕迹。</p>'}</div></section>
   `;
 }
 
@@ -462,17 +601,29 @@ function filterBar() {
 
 function renderPractice() {
   const list = filteredQuestions();
+  if (!list.length && !state.summaryLoading && state.filters.subject !== '全部' && !state.summaries.has(state.filters.subject)) {
+    queueMicrotask(() => loadSummaries(state.filters.subject));
+  }
   if (!state.question && !state.questionLoading && list.length) {
     prepareQueue(list);
     queueMicrotask(() => loadQuestion(list[0].id));
   }
   const question = state.question;
   const result = question && state.submitted && question.mode === 'subjective' ? localGrade(question, state.practiceText) : null;
-  return `<section class="practice-layout reveal"><div class="practice-main"><div class="practice-heading"><div><p class="eyebrow">练习模式 / ${list.length.toLocaleString()} 道匹配题</p><h1>落笔，才算真正读懂。</h1></div><button class="outline-button" data-action="navigate" data-view="desk">${icon('arrow-left')} 回到书桌</button></div>${filterBar()}${state.questionLoading || !question ? loadingCard() : practiceCard(question, result)}</div><aside class="practice-aside"><div class="aside-sticky"><div class="aside-title"><span class="page-corner"></span><div><p class="eyebrow">本轮进度</p><h3>${state.queueIndex + 1} <small>/ ${state.queue.length || list.length || 0}</small></h3></div></div><div class="vertical-progress"><i style="height:${state.queue.length ? ((state.queueIndex + 1) / state.queue.length) * 100 : 0}%"></i></div><p class="aside-caption">每一道题都算数。<br>完成后会自动留下记录。</p><div class="aside-list">${state.queue.slice(Math.max(0, state.queueIndex - 1), state.queueIndex + 3).map((item, i) => `<button class="aside-question ${item.id === question?.id ? 'current' : ''}" data-action="open-question" data-id="${item.id}"><span>${String(state.queue.indexOf(item) + 1).padStart(2, '0')}</span><strong>${escapeHtml(item.title.slice(0, 24))}</strong></button>`).join('')}</div></div></aside></section>`;
+  const content = state.summaryLoading && !list.length
+    ? loadingCard()
+    : state.questionLoading || !question
+      ? (list.length ? loadingCard() : selectionCard())
+      : practiceCard(question, result);
+  return `<section class="practice-layout reveal"><div class="practice-main"><div class="practice-heading"><div><p class="eyebrow">练习模式 / ${list.length.toLocaleString()} 道匹配题</p><h1>落笔，才算真正读懂。</h1></div><button class="outline-button" data-action="navigate" data-view="desk">${icon('arrow-left')} 回到书桌</button></div>${filterBar()}${content}</div><aside class="practice-aside"><div class="aside-sticky"><div class="aside-title"><span class="page-corner"></span><div><p class="eyebrow">本轮进度</p><h3>${state.queueIndex + 1} <small>/ ${state.queue.length || list.length || 0}</small></h3></div></div><div class="vertical-progress"><i style="height:${state.queue.length ? ((state.queueIndex + 1) / state.queue.length) * 100 : 0}%"></i></div><p class="aside-caption">每一道题都算数。<br>完成后会自动留下记录。</p><div class="aside-list">${state.queue.slice(Math.max(0, state.queueIndex - 1), state.queueIndex + 3).map((item, i) => `<button class="aside-question ${item.id === question?.id ? 'current' : ''}" data-action="open-question" data-id="${item.id}"><span>${String(state.queue.indexOf(item) + 1).padStart(2, '0')}</span><strong>${escapeHtml(item.title.slice(0, 24))}</strong></button>`).join('')}</div></div></aside></section>`;
 }
 
 function loadingCard() {
   return `<div class="loading-card"><div class="scribble-loader">${icon('loader-circle')}</div><p>正在翻开这一页...</p></div>`;
+}
+
+function selectionCard() {
+  return `<div class="loading-card"><div class="scribble-loader">${icon('book-open')}</div><p>先在上方选择一个题库，再开始刷题。</p></div>`;
 }
 
 function practiceCard(question, result) {
@@ -513,7 +664,8 @@ function aiResultPanel() {
 function renderLibrary(view) {
   const title = view === 'mistakes' ? '错题回看' : '我的收藏';
   const ids = Object.keys(view === 'mistakes' ? store.mistakes : store.favorites);
-  const questions = ids.map((id) => state.manifest.questions.find((q) => q.id === id)).filter(Boolean);
+  const questions = ids.map((id) => loadedQuestions().find((q) => q.id === id)).filter(Boolean);
+  if (ids.length && questions.length < ids.length && !state.summaryLoading) queueMicrotask(() => loadSummaries('全部'));
   return `<section class="library-page reveal"><div class="library-heading"><div><p class="eyebrow">${view === 'mistakes' ? '需要再看一眼' : '留给下次的标记'}</p><h1>${title}</h1><p>${questions.length ? `共 ${questions.length} 道，按最近标记排序。` : '这里还没有题目。'}</p></div><button class="outline-button" data-action="navigate" data-view="practice">${icon('plus')} 去刷一题</button></div><div class="library-list">${questions.length ? questions.map((q, i) => questionRow(q, i)).join('') : `<div class="empty-library"><div class="empty-mark">${view === 'mistakes' ? '再' : '藏'}</div><h3>${view === 'mistakes' ? '还没有错题记录' : '收藏夹是空的'}</h3><p>${view === 'mistakes' ? '完成练习后，低分题会自动出现在这里。' : '在题目右上角点一下书签，留下你想反复看的题。'}</p></div>`}</div></section>`;
 }
 
@@ -536,7 +688,11 @@ function handleAction(target) {
   if (action === 'navigate') {
     state.view = target.dataset.view;
     location.hash = state.view;
-    if (state.view === 'practice') prepareQueue(filteredQuestions());
+    if (state.view === 'practice') {
+      prepareQueue(filteredQuestions());
+      if (state.filters.subject !== '全部') loadSummaries(state.filters.subject);
+    }
+    if (state.view === 'mistakes' || state.view === 'favorites') loadSummaries('全部');
     render();
   } else if (action === 'subject') {
     state.filters.subject = state.filters.subject === target.dataset.subject ? '全部' : target.dataset.subject;
@@ -544,6 +700,7 @@ function handleAction(target) {
     state.view = 'practice';
     location.hash = 'practice';
     prepareQueue(filteredQuestions());
+    loadSummaries(state.filters.subject);
     render();
   } else if (action === 'quick-start') {
     state.filters.subject = target.dataset.subject || '全部';
@@ -555,9 +712,13 @@ function handleAction(target) {
     state.queue = filteredQuestions();
     state.queueIndex = 0;
     render();
-    loadQuestion(state.queue[0]?.id);
+    loadSummaries(state.filters.subject).then(() => {
+      state.queue = filteredQuestions();
+      state.queueIndex = 0;
+      loadQuestion(state.queue[0]?.id);
+    });
   } else if (action === 'open-question') {
-    const item = state.manifest.questions.find((q) => q.id === target.dataset.id);
+    const item = loadedQuestions().find((q) => q.id === target.dataset.id);
     state.queue = filteredQuestions();
     state.queueIndex = Math.max(0, state.queue.findIndex((q) => q.id === target.dataset.id));
     state.view = 'practice';
@@ -635,6 +796,7 @@ window.addEventListener('hashchange', () => {
 
 async function bootstrap() {
   await loadManifest();
+  await initPersistence();
   render();
 }
 

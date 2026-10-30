@@ -19,9 +19,11 @@
 仓库现在包含一个可直接运行的 Vite Web 应用：
 
 - `npm install` 安装依赖
-- `npm run dev` 启动本地练习工作台
+- `npm run dev` 启动轻量本地练习工作台（不监听海量题库文件，并启用 SQLite 状态保存）
 - `npm run build` 重新扫描 Markdown 题库并生成生产包
 - `npm test` 校验题库数量和生成的题目索引
+
+> 本地后端使用 Node 内置 SQLite，建议使用 Node.js 22.5+（当前开发环境为 Node.js 24）。
 
 打开后可以从今日书桌开始刷题，按科目、题型、题目形式和关键词筛选；主观题支持答案草稿、离线要点自评、参考答案/答题演示、收藏和错题回看。设置页支持保存 OpenAI 兼容接口地址、模型名和 Key，交卷后可请求模型进行语义评分、缺漏点分析和改写建议；选择题数据加入后会自动显示选项、答案解析和模型解析入口。
 
@@ -38,9 +40,15 @@
 ## 🎓 答题演示
 ```
 
-`npm run build:data` 会把源文件转换为 `public/data/index.json` 和按题目拆分的 JSON 文件。生成数据默认不提交 Git，迁移到新环境时运行 `npm install` 后执行 `npm run dev` 或 `npm run build` 即可重建。行测图片会同步复制到 `public/data/xingce-images/`，题目页面会按需加载。
+`npm run build:data` 会把源文件转换为 `public/data/index.json` 和按科目/模块/年份分块的详情 JSON。页面只在打开题目时加载对应数据块，并在当前会话缓存。生成数据默认不提交 Git，迁移到新环境时运行 `npm install` 后执行 `npm run dev` 或 `npm run build` 即可重建。行测图片会同步复制到 `public/data/xingce-images/`，题目页面会按需加载。
 
-行测和公基都采用“源文件目录 + 构建索引”的方式：行测将上游 Markdown 原样保留在 `行测题库/`，公基真题按年份保留在 `公基题库/真题/`。后续增量添加时只需追加对应源文件，再重新运行构建命令。
+行测和公基都采用“源文件目录 + 构建索引”的方式：行测将上游 Markdown 原样保留在 `行测题库/`，公基真题按年份保留在 `公基题库/真题/`。后续增量添加时只需追加对应源文件，再运行 `npm run build`；日常启动 `npm run dev` 会复用已有生产包，不会每次扫描全部源文件。
+
+### 本地后端与 SQLite
+
+本地服务使用 Node 内置 SQLite，将完成记录、收藏、错题、答案草稿和刷题会话保存到 `storage/mojuan.sqlite`。题库正文仍由静态分块文件按需读取，SQLite 不承载大体量题库，因此启动和查询都保持轻量。首次启动会把已有浏览器 `localStorage` 数据合并迁移到 SQLite；如果后端不可用，前端会自动回退到浏览器本地保存。可通过 `MOJUAN_DB` 环境变量指定数据库路径。
+
+当前后端接口为 `GET /api/health`、`GET /api/state` 和 `PUT /api/state`，适合个人本机使用。若要多人公网部署，还需要增加登录鉴权、用户隔离、请求限流和服务端 API Key 代理。
 
 > 数据来源：粉笔题库（个人备考用）。
 
