@@ -58,3 +58,13 @@ test('sqlite store isolates users and supports administrator lifecycle', async (
   store.close();
   await fs.rm(directory, { recursive: true, force: true });
 });
+
+test('fresh store bootstraps the requested default administrator', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'mojuan-bootstrap-'));
+  const file = path.join(directory, 'bootstrap.sqlite');
+  const store = await openSqliteStore(file);
+  const admin = store.authenticate('fpx', '123456');
+  assert.equal(admin?.role, 'admin');
+  store.close();
+  await fs.rm(directory, { recursive: true, force: true });
+});

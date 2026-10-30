@@ -14,7 +14,7 @@ export function loadConfig(env = process.env, cwd = process.cwd()) {
   const production = String(env.NODE_ENV || '').toLowerCase() === 'production';
   const port = numberEnv(env.PORT || env.MOJUAN_PORT, 5173);
   const host = env.MOJUAN_HOST || (production ? '0.0.0.0' : '127.0.0.1');
-  const adminPassword = env.MOJUAN_ADMIN_PASSWORD || (!production ? 'admin12345' : '');
+  const adminPassword = env.MOJUAN_ADMIN_PASSWORD || (!production ? '123456' : '');
   if (production && !adminPassword) throw new Error('生产环境必须设置 MOJUAN_ADMIN_PASSWORD');
 
   return {
@@ -26,7 +26,7 @@ export function loadConfig(env = process.env, cwd = process.cwd()) {
     allowRegistration: booleanEnv(env.MOJUAN_ALLOW_REGISTRATION, !production),
     cookieSecure: booleanEnv(env.MOJUAN_COOKIE_SECURE, production),
     admin: {
-      username: env.MOJUAN_ADMIN_USERNAME || 'admin',
+      username: env.MOJUAN_ADMIN_USERNAME || 'fpx',
       password: adminPassword,
       displayName: env.MOJUAN_ADMIN_NAME || '系统管理员',
     },

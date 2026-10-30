@@ -48,7 +48,7 @@
 
 本地服务使用 Node 内置 SQLite，将账号、会话、完成记录、收藏、错题、答案草稿和刷题会话保存到 `storage/mojuan.sqlite`。题库正文仍由静态分块文件按需读取，SQLite 不承载大体量题库，因此启动和查询都保持轻量。每个账号使用 `user_id` 隔离学习数据，密码使用 `scrypt` 哈希保存，登录使用 HttpOnly 会话 Cookie。旧版本只有 `completed`、`favorites`、`mistakes`、`answers`、`sessions` 的数据库会在首次启动时自动迁移到默认管理员账号。
 
-首次启动默认管理员为 `admin`，本地开发默认密码为 `admin12345`；生产环境必须设置 `MOJUAN_ADMIN_PASSWORD`，否则服务不会启动。生产环境建议复制 `.env.example` 为部署环境变量来源，修改管理员账号和密码，并将 `MOJUAN_ALLOW_REGISTRATION=false`，由管理员在后台创建用户。管理员可在 `/api/admin/users` 管理账号、启停账号和重置密码；普通用户只能访问自己的 `/api/state`。
+首次启动默认管理员为 `fpx`，本地开发默认密码为 `123456`；生产环境必须设置 `MOJUAN_ADMIN_PASSWORD`，否则服务不会启动。生产环境建议复制 `.env.example` 为部署环境变量来源，立即修改管理员账号和密码，并将 `MOJUAN_ALLOW_REGISTRATION=false`，由管理员在后台创建用户。管理员可在 `/api/admin/users` 管理账号、启停账号和重置密码；普通用户只能访问自己的 `/api/state`。
 
 后端接口包括：`/api/auth/login`、`/api/auth/register`、`/api/auth/logout`、`/api/me`、`GET/PUT /api/state`、`/api/admin/users`、`/api/admin/stats` 和 `/api/ai/chat/completions`。统一模型代理只在服务端读取 `MOJUAN_AI_API_KEY`，浏览器不会拿到管理员 Key；用户仍可在设置中填写个人 OpenAI 兼容 Key 覆盖统一配置。生产部署还应在反向代理启用 HTTPS、设置 `MOJUAN_COOKIE_SECURE=true`，并定期备份 `storage/mojuan.sqlite` 及其 `-wal` 文件。
 

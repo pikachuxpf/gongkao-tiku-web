@@ -97,7 +97,7 @@ function validateUsername(username) {
 
 function validatePassword(password) {
   const value = text(password);
-  if (value.length < 8 || value.length > 128) throw new Error('密码长度需为 8-128 个字符');
+  if (value.length < 6 || value.length > 128) throw new Error('密码长度需为 6-128 个字符');
   return value;
 }
 
@@ -159,7 +159,7 @@ export class SqliteStore {
     this.defaultUserId = null;
   }
 
-  ensureBootstrapAdmin({ username = 'admin', password = 'admin12345', displayName = '系统管理员' } = {}) {
+  ensureBootstrapAdmin({ username = 'fpx', password = '123456', displayName = '系统管理员' } = {}) {
     const existing = this.db.prepare('SELECT * FROM users WHERE username = ?').get(username);
     if (existing) {
       this.defaultUserId = Number(existing.user_id);
