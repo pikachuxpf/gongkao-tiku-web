@@ -14,6 +14,11 @@ const summariesRoot = path.join(outputRoot, 'summaries');
 const knowledgeIndexPath = path.join(root, '智能系统', '知识库索引', 'questions_index.jsonl');
 const xingceImageRoot = path.join(root, xingceRootName, '90-图片');
 const xingceImageOutput = path.join(outputRoot, 'xingce-images');
+let xingceAssetFiles = new Set();
+
+const missingTextPlaceholder = '【原题部分文字缺失】';
+const missingImagePlaceholder = '【题目图片缺失】';
+const importedArtifactPattern = /(?:\(?cid:\d+\)?\s*)+/gi;
 
 const sectionNames = {
   title: ['题目'],
@@ -23,7 +28,12 @@ const sectionNames = {
 };
 
 function normalize(value = '') {
-  return value.replace(/\r\n/g, '\n').replace(/\u000d/g, '').trim();
+  return value
+    .replace(/\r\n/g, '\n')
+    .replace(/\u000d/g, '')
+    .replace(importedArtifactPattern, missingTextPlaceholder)
+    .replace(/\ufffd+/g, missingTextPlaceholder)
+    .trim();
 }
 
 function stripMarkdown(value = '') {
@@ -128,14 +138,21 @@ function rewriteXingceAssets(value, relativePath) {
   const sourceDirectory = path.posix.dirname(sourcePath);
   const imagePrefix = `${xingceRootName}/90-图片/`;
   const toUrl = (assetPath) => {
-    if (!assetPath || /^(?:https?:|data:|\/)/i.test(assetPath)) return assetPath;
+    if (!assetPath || /^(?:https?:|data:|\/)/i.test(assetPath)) return { url: assetPath, missing: false };
     const resolved = path.posix.normalize(path.posix.join(sourceDirectory, assetPath));
-    if (!resolved.startsWith(imagePrefix)) return assetPath;
-    return `/data/xingce-images/${encodeAssetPath(resolved.slice(imagePrefix.length))}`;
+    if (!resolved.startsWith(imagePrefix)) return { url: assetPath, missing: false };
+    if (!xingceAssetFiles.has(resolved)) return { url: '', missing: true };
+    return { url: `/data/xingce-images/${encodeAssetPath(resolved.slice(imagePrefix.length))}`, missing: false };
   };
   return value
-    .replace(/(<img\b[^>]*\bsrc=["'])([^"']+)(["'])/gi, (_, prefix, assetPath, suffix) => `${prefix}${toUrl(assetPath)}${suffix}`)
-    .replace(/(!\[[^\]]*\]\()([^\)]+)(\))/g, (_, prefix, assetPath, suffix) => `${prefix}${toUrl(assetPath)}${suffix}`);
+    .replace(/<img\b([^>]*\bsrc=["'])([^"']+)(["'][^>]*)>/gi, (_, prefix, assetPath, suffix) => {
+      const result = toUrl(assetPath);
+      return result.missing ? missingImagePlaceholder : `<img${prefix}${result.url}${suffix}>`;
+    })
+    .replace(/(!\[[^\]]*\]\()([^\)]+)(\))/g, (_, prefix, assetPath, suffix) => {
+      const result = toUrl(assetPath.trim());
+      return result.missing ? missingImagePlaceholder : `${prefix}${result.url}${suffix}`;
+    });
 }
 
 function parseXingceOptions(value) {
@@ -335,6 +352,17 @@ async function readFiles(directory) {
   return files;
 }
 
+async function readAllFiles(directory) {
+  const entries = await fs.readdir(directory, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    const fullPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) files.push(...await readAllFiles(fullPath));
+    else if (entry.isFile()) files.push(fullPath);
+  }
+  return files;
+}
+
 async function loadEnrichment() {
   const enriched = new Map();
   try {
@@ -390,6 +418,7 @@ for (const file of files) {
 }
 
 const xingceFiles = await readFiles(path.join(root, xingceRootName));
+xingceAssetFiles = new Set((await readAllFiles(xingceImageRoot)).map((file) => path.relative(root, file).replaceAll('\\', '/')));
 for (const file of xingceFiles) {
   if (file.includes(`${path.sep}90-图片${path.sep}`)) continue;
   const relativePath = path.relative(root, file);

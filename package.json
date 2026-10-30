@@ -10,6 +10,7 @@
     "dev": "node scripts/ensure-data.mjs && node scripts/serve-local.mjs",
     "start": "node scripts/ensure-data.mjs && node scripts/serve-local.mjs",
     "build:data": "node scripts/build-data.mjs",
+    "audit:data": "npm run build:data && node scripts/audit-data.mjs",
     "build": "npm run build:data && vite build",
     "preview": "vite preview",
     "pretest": "npm run build:data",

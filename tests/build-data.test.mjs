@@ -71,6 +71,27 @@ test('generated manifest exposes portable summary data', async () => {
   }
 });
 
+test('generated question text contains no unrecoverable encoding artifacts', async () => {
+  const dataRoot = path.join(root, 'public', 'data');
+  const manifest = JSON.parse(await fs.readFile(path.join(dataRoot, 'index.json'), 'utf8'));
+  const detailCache = new Map();
+  for (const subject of manifest.subjects) {
+    const summary = JSON.parse(await fs.readFile(path.join(dataRoot, manifest.summaryFiles[subject]), 'utf8'));
+    for (const item of summary.questions) {
+      let chunk = detailCache.get(item.detailChunk);
+      if (!chunk) {
+        chunk = JSON.parse(await fs.readFile(path.join(dataRoot, item.detailChunk), 'utf8'));
+        detailCache.set(item.detailChunk, chunk);
+      }
+      const question = chunk.questions[item.id];
+      const text = JSON.stringify(question);
+      assert.doesNotMatch(text, /\bcid:\d+\b/i, `${item.id} still contains a cid marker`);
+      assert.doesNotMatch(text, /\ufffd/, `${item.id} still contains a replacement character`);
+      assert.doesNotMatch(text, /<img\b[^>]*\bsrc=["'](?!\/data\/xingce-images\/)/i, `${item.id} contains an unsafe image URL`);
+    }
+  }
+});
+
 async function walk(directory) {
   const files = [];
   for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
