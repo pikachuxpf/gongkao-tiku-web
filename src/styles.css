@@ -49,6 +49,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .subject-tab em { margin-left: auto; color: var(--line-dark); font-size: 11px; font-style: normal; }
 .ink-dot { width: 8px; height: 8px; display: inline-block; border-radius: 50%; background: var(--red); transform: rotate(-15deg); }
 .ink-dot.blue { background: var(--blue); }
+.ink-dot.yellow { background: var(--yellow); }
+.ink-dot.green { background: var(--green); }
 .sidebar-bottom { margin-top: auto; }
 .progress-stamp { padding: 14px 12px 15px; border: 1px solid var(--line-dark); position: relative; transform: rotate(-1.2deg); }
 .progress-stamp::after { content: ''; position: absolute; inset: 3px -3px -3px 3px; border: 1px solid rgba(169, 157, 141, .45); z-index: -1; }
@@ -106,6 +108,8 @@ h3 { margin-bottom: 0; font-size: 18px; }
 .launch-card:hover { transform: translateY(-5px) rotate(-.5deg); box-shadow: var(--shadow); }
 .red-card { background: var(--red); color: var(--paper-light); }
 .blue-card { background: var(--blue); color: var(--paper-light); }
+.yellow-card { background: var(--yellow); color: var(--ink); }
+.green-card { background: var(--green); color: var(--paper-light); }
 .pale-card { border-color: var(--line-dark); background: var(--paper-light); }
 .card-ink { position: absolute; top: 17px; right: 20px; font-size: 11px; opacity: .65; }
 .launch-icon { display: block; margin-bottom: 31px; }
@@ -168,6 +172,7 @@ h3 { margin-bottom: 0; font-size: 18px; }
 .material-copy { max-height: 315px; overflow: auto; padding: 20px 22px; border-left: 2px solid rgba(82, 127, 149, .58); color: #504d47; background: rgba(236, 228, 215, .35); font-family: var(--serif); font-size: 13px; line-height: 1.95; }
 .material-copy p { max-width: 74ch; margin-bottom: 14px; }
 .material-copy p:last-child { margin-bottom: 0; }
+.question-image { display: block; max-width: 100%; height: auto; margin: 12px auto; border: 1px solid rgba(169, 157, 141, .55); }
 .answer-section { margin-top: 30px; }
 textarea { width: 100%; min-height: 190px; resize: vertical; padding: 17px 18px; border: 1px solid var(--line-dark); color: var(--ink); background-color: var(--paper-light); background-image: linear-gradient(rgba(169,157,141,.16) 1px, transparent 1px); background-size: 100% 31px; line-height: 31px; }
 textarea::placeholder { color: var(--line-dark); }

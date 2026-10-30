@@ -4,3 +4,4 @@ public/data/
 .impeccable/
 .playwright-mcp/
 artifacts/
+.source/

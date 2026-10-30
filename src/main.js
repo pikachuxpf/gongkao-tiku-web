@@ -76,6 +76,37 @@ function formatText(value = '') {
     .join('');
 }
 
+function formatRichText(value = '') {
+  const normalized = String(value).replace(/\r/g, '').trim();
+  if (!normalized) return '<p class="muted">暂无内容。</p>';
+
+  const images = [];
+  const tokenized = normalized
+    .replace(/<img\b([^>]*)>/gi, (_, attributes) => {
+      const src = attributes.match(/\bsrc=["']([^"']+)["']/i)?.[1] || '';
+      if (!src.startsWith('/data/xingce-images/') || src.includes('..')) return '';
+      const token = `__MOJUAN_IMAGE_${images.length}__`;
+      images.push(`<img class="question-image" src="${escapeHtml(src)}" alt="题目图片" loading="lazy">`);
+      return `\n${token}\n`;
+    })
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p\s*>/gi, '\n\n')
+    .replace(/<p\b[^>]*>/gi, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/\u00a0/g, ' ');
+
+  return tokenized
+    .split(/\n{2,}/)
+    .map((paragraph) => {
+      const content = paragraph.trim();
+      if (!content) return '';
+      return `<p>${escapeHtml(content).replace(/__MOJUAN_IMAGE_(\d+)__/g, (_, index) => images[Number(index)] || '')}</p>`;
+    })
+    .filter(Boolean)
+    .join('');
+}
+
 function renderMarkdownPreview(value = '') {
   return value
     .split('\n')
@@ -110,7 +141,15 @@ function showToast(message) {
 }
 
 function categories() {
-  return [...new Set((state.manifest?.questions || []).map((item) => item.category))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+  const subject = state.filters.subject;
+  return [...new Set((state.manifest?.questions || [])
+    .filter((item) => subject === '全部' || item.subject === subject)
+    .map((item) => item.category))]
+    .sort((a, b) => a.localeCompare(b, 'zh-CN'));
+}
+
+function subjectCount(subject) {
+  return (state.manifest?.questions || []).filter((question) => question.subject === subject).length;
 }
 
 function filteredQuestions() {
@@ -200,12 +239,25 @@ function toggleFavorite(id) {
 function markSubmitted(question, text, result) {
   const id = question.id;
   store.completed[id] = { at: Date.now(), score: result?.score ?? null };
-  store.answers[id] = { text, at: Date.now(), score: result?.score ?? null };
+  const previous = store.answers[id] || {};
+  store.answers[id] = question.mode === 'choice'
+    ? { ...previous, at: Date.now(), score: result?.score ?? null }
+    : { text, at: Date.now(), score: result?.score ?? null };
   if (result && result.score < 60) store.mistakes[id] = { at: Date.now(), score: result.score };
   else delete store.mistakes[id];
   store.sessions.unshift({ date: today(), id, mode: question.mode });
   store.sessions = store.sessions.slice(0, 1000);
   persist();
+}
+
+function selectedChoice(question) {
+  return String(store.answers[question.id]?.choice || '').replace(/[^A-H]/gi, '').toUpperCase().split('').sort().join('');
+}
+
+function choiceResult(question) {
+  const selected = selectedChoice(question);
+  const correct = String(question.correctAnswer || question.answer || '').replace(/[^A-H]/gi, '').toUpperCase().split('').sort().join('');
+  return { selected, correct, isCorrect: Boolean(selected && correct && selected === correct), score: selected === correct ? 100 : 0 };
 }
 
 function extractLimit(stem = '') {
@@ -249,11 +301,15 @@ function submitAnswer() {
   const question = state.question;
   if (!question) return;
   if (question.mode === 'choice') {
+    const selected = selectedChoice(question);
+    if (!selected) {
+      showToast('先选择一个答案，再交卷');
+      return;
+    }
+    const result = choiceResult(question);
     state.submitted = true;
-    store.completed[question.id] = { at: Date.now(), score: null };
-    persist();
+    markSubmitted(question, '', result);
     render();
-    showToast('已记录本题');
     return;
   }
   if (!state.practiceText.trim()) {
@@ -300,7 +356,8 @@ function buildPrompt(question, userAnswer, kind = 'score') {
   const task = kind === 'explain'
     ? '请解释这道选择题的正确答案，逐项说明选项为什么对或错。'
     : '请像一名严格但建设性的申论阅卷老师一样评分，并给出可以直接执行的修改建议。';
-  return `${task}\n\n只根据题目材料和参考答案判断，不要编造材料中没有的事实。\n请使用中文，返回 JSON，不要 Markdown 代码围栏。\nJSON 字段：score(number, 0-100), summary(string), dimensions(array of {name, score, note}), missing(array of string), suggestions(array of string), rewrite(string)。\n\n题型：${question.questionType}\n题目：${question.stem}\n给定材料：${question.material}\n参考答案：${question.answer}\n学生作答：${userAnswer || '（选择题无需填写）'}`;
+  const selected = question.mode === 'choice' ? selectedChoice(question) : userAnswer;
+  return `${task}\n\n只根据题目材料和参考答案判断，不要编造材料中没有的事实。\n请使用中文，返回 JSON，不要 Markdown 代码围栏。\nJSON 字段：score(number, 0-100), summary(string), dimensions(array of {name, score, note}), missing(array of string), suggestions(array of string), rewrite(string)。\n\n题型：${question.questionType}\n题目：${question.stem}\n给定材料：${question.material}\n参考答案：${question.answer}\n官方解析：${question.explanation || question.demo || ''}\n学生作答：${selected || '（未选择）'}`;
 }
 
 async function askModel(kind = 'score') {
@@ -366,8 +423,10 @@ function renderShell(content) {
         </nav>
         <p class="nav-label library-label">题库切换</p>
         <div class="subject-switcher">
-          <button class="subject-tab ${state.filters.subject === '申论' ? 'selected' : ''}" data-action="subject" data-subject="申论"><span class="ink-dot red"></span>申论题库<em>${state.manifest?.questions.filter((q) => q.subject === '申论').length.toLocaleString() || 0}</em></button>
-          <button class="subject-tab ${state.filters.subject === '综应' ? 'selected' : ''}" data-action="subject" data-subject="综应"><span class="ink-dot blue"></span>综应题库<em>${state.manifest?.questions.filter((q) => q.subject === '综应').length.toLocaleString() || 0}</em></button>
+          <button class="subject-tab ${state.filters.subject === '申论' ? 'selected' : ''}" data-action="subject" data-subject="申论"><span class="ink-dot red"></span>申论题库<em>${subjectCount('申论').toLocaleString()}</em></button>
+          <button class="subject-tab ${state.filters.subject === '综应' ? 'selected' : ''}" data-action="subject" data-subject="综应"><span class="ink-dot blue"></span>综应题库<em>${subjectCount('综应').toLocaleString()}</em></button>
+          <button class="subject-tab ${state.filters.subject === '行测' ? 'selected' : ''}" data-action="subject" data-subject="行测"><span class="ink-dot yellow"></span>行测题库<em>${subjectCount('行测').toLocaleString()}</em></button>
+          <button class="subject-tab ${state.filters.subject === '公基' ? 'selected' : ''}" data-action="subject" data-subject="公基"><span class="ink-dot green"></span>公基题库<em>${subjectCount('公基').toLocaleString()}</em></button>
         </div>
         <div class="sidebar-bottom"><div class="progress-stamp"><span>已完成</span><strong>${progressPercent()}%</strong><div class="progress-line"><i style="width:${progressPercent()}%"></i></div></div>${navItem('settings', '设置与模型', 'sliders-horizontal')}</div>
       </aside>
@@ -388,7 +447,7 @@ function renderDesk() {
   return `
     <section class="desk-intro reveal"><div><p class="eyebrow">${today()} / 学习记录</p><h1>把今天的答案，<br><span>写在纸上。</span></h1><p class="intro-copy">这是你的公考练习桌。先做一题，再看解析；把不熟的地方标出来，下一次就知道从哪里开始。</p></div><div class="desk-sketch" aria-hidden="true"><div class="sketch-circle"></div><div class="sketch-pencil">✎</div><span>今天的<br>一小步</span></div></section>
     <section class="stat-strip reveal delay-1"><div class="stat-cell"><span>题库总量</span><strong>${c.total.toLocaleString()}</strong><small>道真题</small></div><div class="stat-cell"><span>今日完成</span><strong>${c.today}</strong><small>道练习</small></div><div class="stat-cell"><span>已收藏</span><strong>${c.favorites}</strong><small>道重点</small></div><div class="stat-cell accent"><span>完成进度</span><strong>${progressPercent()}<i>%</i></strong><small>持续积累中</small></div></section>
-    <section class="desk-grid reveal delay-2"><div class="section-heading"><div><p class="eyebrow">练习入口</p><h2>今天从哪里开始？</h2></div><button class="text-button" data-action="navigate" data-view="practice">浏览全部 ${icon('arrow-up-right')}</button></div><div class="launch-grid"><button class="launch-card red-card" data-action="quick-start" data-subject="申论"><span class="card-ink">01</span><span class="launch-icon">${icon('pen-line')}</span><strong>申论题库</strong><small>材料阅读 · 要点提炼 · 文章写作</small><i class="launch-arrow">${icon('arrow-up-right')}</i></button><button class="launch-card blue-card" data-action="quick-start" data-subject="综应"><span class="card-ink">02</span><span class="launch-icon">${icon('layers-3')}</span><strong>综应题库</strong><small>案例分析 · 公文处理 · 科技实务</small><i class="launch-arrow">${icon('arrow-up-right')}</i></button><button class="launch-card pale-card" data-action="quick-start" data-mode="subjective"><span class="card-ink">03</span><span class="launch-icon">${icon('message-square-more')}</span><strong>主观题专场</strong><small>写完即评 · 看见自己的进步</small><i class="launch-arrow">${icon('arrow-up-right')}</i></button></div></section>
+    <section class="desk-grid reveal delay-2"><div class="section-heading"><div><p class="eyebrow">练习入口</p><h2>今天从哪里开始？</h2></div><button class="text-button" data-action="navigate" data-view="practice">浏览全部 ${icon('arrow-up-right')}</button></div><div class="launch-grid"><button class="launch-card red-card" data-action="quick-start" data-subject="申论"><span class="card-ink">01</span><span class="launch-icon">${icon('pen-line')}</span><strong>申论题库</strong><small>材料阅读 · 要点提炼 · 文章写作</small><i class="launch-arrow">${icon('arrow-up-right')}</i></button><button class="launch-card blue-card" data-action="quick-start" data-subject="综应"><span class="card-ink">02</span><span class="launch-icon">${icon('layers-3')}</span><strong>综应题库</strong><small>案例分析 · 公文处理 · 科技实务</small><i class="launch-arrow">${icon('arrow-up-right')}</i></button><button class="launch-card yellow-card" data-action="quick-start" data-subject="行测"><span class="card-ink">03</span><span class="launch-icon">${icon('scan-search')}</span><strong>行测题库</strong><small>六大模块 · 真题解析 · 图题支持</small><i class="launch-arrow">${icon('arrow-up-right')}</i></button><button class="launch-card green-card" data-action="quick-start" data-subject="公基"><span class="card-ink">04</span><span class="launch-icon">${icon('landmark')}</span><strong>事业编公基</strong><small>政治理论 · 常识判断 · 逐题解析</small><i class="launch-arrow">${icon('arrow-up-right')}</i></button><button class="launch-card pale-card" data-action="quick-start" data-mode="subjective"><span class="card-ink">05</span><span class="launch-icon">${icon('message-square-more')}</span><strong>主观题专场</strong><small>写完即评 · 看见自己的进步</small><i class="launch-arrow">${icon('arrow-up-right')}</i></button></div></section>
     <section class="desk-lower reveal delay-3"><div class="recommendation"><div class="section-heading"><div><p class="eyebrow">为你挑选</p><h2>下一题</h2></div><span class="hand-note">不重复已完成</span></div>${recommendations.length ? recommendations.map((q, i) => questionRow(q, i)).join('') : `<div class="empty-state">${icon('check-check')}<p>这一轮题目都完成了。</p><button class="outline-button" data-action="navigate" data-view="practice">换一组题</button></div>`}</div><div class="recent-note"><div class="section-heading"><div><p class="eyebrow">最近落笔</p><h2>练习痕迹</h2></div></div>${recent.length ? recent.map((q) => `<button class="recent-row" data-action="open-question" data-id="${q.id}"><span>${escapeHtml(q.subject)} · ${escapeHtml(q.category)}</span><strong>${escapeHtml(q.title.replace(/^请根据[““]?给定资料[””]?[,，]?/, '').slice(0, 34))}</strong><i>${icon('chevron-right')}</i></button>`).join('') : '<p class="muted empty-copy">完成第一道题后，这里会留下你的练习痕迹。</p>'}</div></section>
   `;
 }
@@ -398,7 +457,7 @@ function questionRow(question, index = 0) {
 }
 
 function filterBar() {
-  return `<div class="filter-bar"><label class="search-field">${icon('search')}<input data-input="search" value="${escapeHtml(state.filters.search)}" placeholder="搜题干、题型或主题" /></label><select data-input="subject"><option>全部</option><option ${state.filters.subject === '申论' ? 'selected' : ''}>申论</option><option ${state.filters.subject === '综应' ? 'selected' : ''}>综应</option></select><select data-input="category"><option>全部</option>${categories().map((category) => `<option ${state.filters.category === category ? 'selected' : ''}>${escapeHtml(category)}</option>`).join('')}</select><select data-input="mode"><option value="全部">全部形式</option><option value="subjective" ${state.filters.mode === 'subjective' ? 'selected' : ''}>主观题</option><option value="choice" ${state.filters.mode === 'choice' ? 'selected' : ''}>选择题</option></select></div>`;
+  return `<div class="filter-bar"><label class="search-field">${icon('search')}<input data-input="search" value="${escapeHtml(state.filters.search)}" placeholder="搜题干、题型或主题" /></label><select data-input="subject"><option>全部</option><option ${state.filters.subject === '申论' ? 'selected' : ''}>申论</option><option ${state.filters.subject === '综应' ? 'selected' : ''}>综应</option><option ${state.filters.subject === '行测' ? 'selected' : ''}>行测</option><option ${state.filters.subject === '公基' ? 'selected' : ''}>公基</option></select><select data-input="category"><option>全部</option>${categories().map((category) => `<option ${state.filters.category === category ? 'selected' : ''}>${escapeHtml(category)}</option>`).join('')}</select><select data-input="mode"><option value="全部">全部形式</option><option value="subjective" ${state.filters.mode === 'subjective' ? 'selected' : ''}>主观题</option><option value="choice" ${state.filters.mode === 'choice' ? 'selected' : ''}>选择题</option></select></div>`;
 }
 
 function renderPractice() {
@@ -419,17 +478,24 @@ function loadingCard() {
 function practiceCard(question, result) {
   const isFavorite = Boolean(store.favorites[question.id]);
   const options = question.options || [];
-  return `<article class="question-paper"><div class="paper-topline"><span>${escapeHtml(question.subject)} / ${escapeHtml(question.category)}</span><div><span class="paper-id">#${escapeHtml(question.id)}</span><button class="icon-button small ${isFavorite ? 'is-favorite' : ''}" data-action="favorite" title="${isFavorite ? '取消收藏' : '收藏'}">${icon('bookmark')}</button></div></div><div class="question-title-row"><div class="question-number">${String(state.queueIndex + 1).padStart(2, '0')}</div><div><h2>${escapeHtml(question.title)}</h2><div class="question-tags">${question.detailType ? `<span>${escapeHtml(question.detailType)}</span>` : ''}${question.themes?.slice(0, 2).map((theme) => `<span>${escapeHtml(theme)}</span>`).join('') || ''}</div></div></div><div class="material-section"><div class="section-label"><span>给定材料</span><i></i><small>${question.material ? `${question.material.length.toLocaleString()} 字` : '题干阅读'}</small></div><div class="material-copy">${formatText(question.material || question.stem)}</div></div><div class="answer-section"><div class="section-label"><span>你的作答</span><i></i><small>${question.mode === 'choice' ? '选择一个答案' : `${extractLimit(question.stem) ? `限 ${extractLimit(question.stem)} 字` : '不限字数'}`}</small></div>${options.length ? choiceInput(question, options) : `<textarea id="answer-box" data-input="answer" ${state.submitted ? 'readonly' : ''} placeholder="从材料中提炼要点，写下你的答案...">${escapeHtml(state.practiceText)}</textarea><div class="answer-tools"><span>${state.practiceText.length} 字</span><button class="ghost-button" data-action="clear-answer" ${state.submitted ? 'disabled' : ''}>清空</button></div>`}</div>${state.submitted ? resultPanel(question, result) : ''}<div class="paper-actions"><button class="secondary-button" data-action="previous" ${state.queueIndex <= 0 ? 'disabled' : ''}>${icon('arrow-left')} 上一题</button><div class="primary-actions">${question.mode === 'choice' && settings.aiEnabled ? `<button class="ai-button" data-action="ask-ai-explain" ${state.aiLoading ? 'disabled' : ''}>${icon('sparkles')} ${state.aiLoading ? '解析中...' : '大模型解析'}</button>` : ''}<button class="submit-button" data-action="submit" ${state.submitted ? 'disabled' : ''}>${state.submitted ? icon('check') + ' 已完成' : '交卷并查看解析'}</button></div><button class="secondary-button" data-action="next">下一题 ${icon('arrow-right')}</button></div></article>`;
+  const context = [question.paper, question.year && `${question.year}年`].filter(Boolean).join(' · ');
+  return `<article class="question-paper"><div class="paper-topline"><span>${escapeHtml(question.subject)} / ${escapeHtml(question.category)}${context ? ` · ${escapeHtml(context)}` : ''}</span><div><span class="paper-id">#${escapeHtml(question.id)}</span><button class="icon-button small ${isFavorite ? 'is-favorite' : ''}" data-action="favorite" title="${isFavorite ? '取消收藏' : '收藏'}">${icon('bookmark')}</button></div></div><div class="question-title-row"><div class="question-number">${String(state.queueIndex + 1).padStart(2, '0')}</div><div><h2>${escapeHtml(question.title)}</h2><div class="question-tags">${question.detailType ? `<span>${escapeHtml(question.detailType)}</span>` : ''}${question.themes?.slice(0, 2).map((theme) => `<span>${escapeHtml(theme)}</span>`).join('') || ''}</div></div></div><div class="material-section"><div class="section-label"><span>${question.material ? '给定材料' : '题目'}</span><i></i><small>${question.material ? `${question.material.length.toLocaleString()} 字` : '题干阅读'}</small></div><div class="material-copy">${formatRichText(question.material || question.stem)}</div></div><div class="answer-section"><div class="section-label"><span>你的作答</span><i></i><small>${question.mode === 'choice' ? '选择一个答案' : `${extractLimit(question.stem) ? `限 ${extractLimit(question.stem)} 字` : '不限字数'}`}</small></div>${options.length ? choiceInput(question, options) : `<textarea id="answer-box" data-input="answer" ${state.submitted ? 'readonly' : ''} placeholder="从材料中提炼要点，写下你的答案...">${escapeHtml(state.practiceText)}</textarea><div class="answer-tools"><span>${state.practiceText.length} 字</span><button class="ghost-button" data-action="clear-answer" ${state.submitted ? 'disabled' : ''}>清空</button></div>`}</div>${state.submitted ? resultPanel(question, result) : ''}<div class="paper-actions"><button class="secondary-button" data-action="previous" ${state.queueIndex <= 0 ? 'disabled' : ''}>${icon('arrow-left')} 上一题</button><div class="primary-actions">${question.mode === 'choice' && settings.aiEnabled ? `<button class="ai-button" data-action="ask-ai-explain" ${state.aiLoading ? 'disabled' : ''}>${icon('sparkles')} ${state.aiLoading ? '解析中...' : '大模型解析'}</button>` : ''}<button class="submit-button" data-action="submit" ${state.submitted ? 'disabled' : ''}>${state.submitted ? icon('check') + ' 已完成' : '交卷并查看解析'}</button></div><button class="secondary-button" data-action="next">下一题 ${icon('arrow-right')}</button></div></article>`;
 }
 
 function choiceInput(question, options) {
   const selected = store.answers[question.id]?.choice || '';
-  return `<div class="choice-list">${options.map((option) => `<label class="choice-option ${selected === option.key ? 'selected' : ''}"><input type="radio" name="choice" value="${option.key}" ${selected === option.key ? 'checked' : ''} ${state.submitted ? 'disabled' : ''}/><span class="choice-key">${option.key}</span><span>${escapeHtml(option.text)}</span></label>`).join('')}</div>`;
+  const isMultiple = String(question.correctAnswer || question.answer || '').replace(/[^A-H]/gi, '').length > 1;
+  return `<div class="choice-list ${isMultiple ? 'multiple-choice' : ''}">${options.map((option) => {
+    const checked = selected.includes(option.key);
+    return `<label class="choice-option ${checked ? 'selected' : ''}"><input type="${isMultiple ? 'checkbox' : 'radio'}" name="choice" value="${option.key}" ${checked ? 'checked' : ''} ${state.submitted ? 'disabled' : ''}/><span class="choice-key">${option.key}</span><span>${formatRichText(option.text)}</span></label>`;
+  }).join('')}</div>`;
 }
 
 function resultPanel(question, result) {
   if (question.mode === 'choice') {
-    return `<div class="result-panel choice-result"><div class="result-heading"><span class="result-badge">参考解析</span><h3>答案与思路</h3></div><div class="reference-copy">${formatText(question.answer)}</div><button class="ai-text-button" data-action="ask-ai-explain" ${state.aiLoading ? 'disabled' : ''}>${icon('sparkles')} ${state.aiLoading ? '正在请教模型...' : '让大模型补充一版解析'}</button>${aiResultPanel()}</div>`;
+    const choice = choiceResult(question);
+    const explanation = question.explanation || question.demo || '';
+    return `<div class="result-panel choice-result"><div class="result-heading"><span class="result-badge">${choice.isCorrect ? '回答正确' : '需要订正'}</span><h3>${choice.selected ? `你的答案 ${escapeHtml(choice.selected)} · 正确答案 ${escapeHtml(choice.correct || '未标注')}` : `正确答案 ${escapeHtml(choice.correct || '未标注')}`}</h3></div><div class="reference-copy">${formatRichText(explanation || `正确答案：${question.answer || '暂无'}`)}</div><button class="ai-text-button" data-action="ask-ai-explain" ${state.aiLoading ? 'disabled' : ''}>${icon('sparkles')} ${state.aiLoading ? '正在请教模型...' : '让大模型补充一版解析'}</button>${aiResultPanel()}</div>`;
   }
   return `<div class="result-panel"><div class="score-head"><div><span class="result-badge">本次自评</span><strong>${result?.score ?? '--'}<small>/100</small></strong></div><div class="score-caption">${result?.coverage ?? 0}% 要点覆盖<br><span>${result?.words ?? 0}${result?.limit ? ` / ${result.limit}` : ''} 字</span></div></div><div class="score-bars">${scoreBar('要点覆盖', result?.coverage ?? 0, '#df6658')}${scoreBar('结构条理', result && /\n|\d+[.、]|[一二三四五六七八九十]+、/.test(state.practiceText) ? 88 : 48, '#527f95')}${scoreBar('字数控制', result?.limit && result.words > result.limit ? Math.max(10, Math.round((result.limit / result.words) * 100)) : 100, '#e6ad4d')}</div><div class="suggestion-block"><h4>落笔建议</h4><ul>${(result?.suggestions || []).map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul></div><div class="reference-fold"><button class="reference-toggle" data-action="toggle-reference">${state.loadedAnswer ? '收起参考答案与演示' : '展开参考答案与演示'} ${icon(state.loadedAnswer ? 'chevron-up' : 'chevron-down')}</button>${state.loadedAnswer ? `<div class="reference-copy"><h4>参考答案</h4>${formatText(question.answer)}<h4>答题演示</h4>${formatText(question.demo)}</div>` : ''}</div><div class="ai-coach-row"><span>${icon('sparkles')} 想要更细的语义反馈？</span><button class="ai-text-button" data-action="ask-ai-score" ${state.aiLoading ? 'disabled' : ''}>${state.aiLoading ? '正在请教模型...' : '请大模型点评'} ${icon('arrow-up-right')}</button></div>${aiResultPanel()}</div>`;
 }
@@ -535,10 +601,14 @@ app.addEventListener('change', (event) => {
     return;
   }
   if (input.name === 'choice' && state.question) {
-    store.answers[state.question.id] = { choice: input.value, at: Date.now() };
+    const choiceList = input.closest('.choice-list');
+    const choices = [...choiceList.querySelectorAll('input[name="choice"]:checked')]
+      .map((item) => item.value)
+      .sort()
+      .join('');
+    store.answers[state.question.id] = { ...(store.answers[state.question.id] || {}), choice: choices, at: Date.now() };
     persist();
-    input.closest('.choice-list')?.querySelectorAll('.choice-option').forEach((item) => item.classList.remove('selected'));
-    input.closest('.choice-option')?.classList.add('selected');
+    choiceList.querySelectorAll('.choice-option').forEach((item) => item.classList.toggle('selected', item.querySelector('input')?.checked));
   }
 });
 
