@@ -266,6 +266,7 @@ async function submitAuth(form) {
     state.user = payload.user;
     settings = { ...DEFAULT_SETTINGS, ...loadJson(`${SETTINGS_KEY}.${state.user.id}`, loadJson(SETTINGS_KEY, {})) };
     loadUserStorage();
+    await loadManifest();
     await initPersistence();
     render();
   } catch (error) {
