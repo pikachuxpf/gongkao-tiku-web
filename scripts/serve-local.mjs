@@ -112,14 +112,29 @@ async function jsonBody(request) {
 async function proxyAi(request, response) {
   const user = requireUser(request, response);
   if (!user) return;
-  if (!config.ai.apiKey) { sendJson(response, 503, { ok: false, error: '管理员尚未配置统一大模型 API Key' }); return; }
+  const ai = getSharedAiConfig();
+  if (!ai.apiKey) { sendJson(response, 503, { ok: false, error: '管理员尚未配置统一大模型 API Key，请联系管理员到设置页保存模型配置' }); return; }
   const body = await jsonBody(request);
-  body.model = config.ai.model;
-  const upstream = await fetch(`${config.ai.endpoint}/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.ai.apiKey}` }, body: JSON.stringify(body) });
-  response.statusCode = upstream.status;
-  response.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/json');
-  response.setHeader('Cache-Control', 'no-store');
-  response.end(Buffer.from(await upstream.arrayBuffer()));
+  body.model = ai.model;
+  try {
+    const upstream = await fetch(`${ai.endpoint}/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ai.apiKey}` }, body: JSON.stringify(body), signal: AbortSignal.timeout(120_000) });
+    response.statusCode = upstream.status;
+    response.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/json');
+    response.setHeader('Cache-Control', 'no-store');
+    response.end(Buffer.from(await upstream.arrayBuffer()));
+  } catch (error) {
+    sendJson(response, 502, { ok: false, error: `连接大模型服务失败：${error.name === 'TimeoutError' ? '请求超时' : '请检查服务器网络和接口地址'}` });
+  }
+}
+
+function getSharedAiConfig() {
+  let saved = {};
+  try { saved = JSON.parse(store.getSetting('sharedAi') || '{}'); } catch { /* Ignore malformed persisted settings. */ }
+  return {
+    endpoint: String(saved.endpoint || config.ai.endpoint).replace(/\/$/, ''),
+    model: String(saved.model || config.ai.model),
+    apiKey: String(Object.hasOwn(saved, 'apiKey') ? saved.apiKey : config.ai.apiKey),
+  };
 }
 
 const server = http.createServer(async (request, response) => {
@@ -132,7 +147,7 @@ const server = http.createServer(async (request, response) => {
   try {
     if (pathname.startsWith('/api/') && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method) && !verifySameOrigin(request, response)) return;
     if (pathname === '/api/health' && request.method === 'GET') { sendJson(response, 200, { ok: true, storage: 'sqlite', multiUser: true }); return; }
-    if (pathname === '/api/config' && request.method === 'GET') { sendJson(response, 200, { ok: true, registration: config.allowRegistration, ai: { configured: Boolean(config.ai.apiKey), model: config.ai.model } }); return; }
+    if (pathname === '/api/config' && request.method === 'GET') { const ai = getSharedAiConfig(); sendJson(response, 200, { ok: true, registration: config.allowRegistration, ai: { configured: Boolean(ai.apiKey), model: ai.model } }); return; }
     if (pathname === '/api/me' && request.method === 'GET') { const user = currentUser(request); sendJson(response, 200, user ? { ok: true, user } : { ok: false, user: null }); return; }
     if (pathname === '/api/auth/login' && request.method === 'POST') {
       if (!checkLoginRateLimit(request, response)) return;
@@ -161,6 +176,26 @@ const server = http.createServer(async (request, response) => {
       if (pathname === '/api/admin/users' && request.method === 'GET') { sendJson(response, 200, { ok: true, users: store.listUsers() }); return; }
       if (pathname === '/api/admin/users' && request.method === 'POST') { const body = await jsonBody(request); sendJson(response, 201, { ok: true, user: store.createUser({ username: body.username, password: body.password, displayName: body.displayName, role: body.role }) }); return; }
       if (pathname === '/api/admin/stats' && request.method === 'GET') { sendJson(response, 200, { ok: true, stats: store.stats() }); return; }
+      if (pathname === '/api/admin/ai-config' && request.method === 'GET') {
+        const ai = getSharedAiConfig();
+        sendJson(response, 200, { ok: true, ai: { endpoint: ai.endpoint, model: ai.model, configured: Boolean(ai.apiKey) } });
+        return;
+      }
+      if (pathname === '/api/admin/ai-config' && request.method === 'PUT') {
+        const body = await jsonBody(request);
+        const current = getSharedAiConfig();
+        const endpoint = String(body.endpoint || '').trim().replace(/\/$/, '');
+        const model = String(body.model || '').trim();
+        let parsedEndpoint;
+        try { parsedEndpoint = new URL(endpoint); } catch { parsedEndpoint = null; }
+        if (!parsedEndpoint || !['http:', 'https:'].includes(parsedEndpoint.protocol)) { sendJson(response, 400, { ok: false, error: '接口地址必须是有效的 http:// 或 https:// URL' }); return; }
+        if (!model) { sendJson(response, 400, { ok: false, error: '请填写模型名称' }); return; }
+        let apiKey = String(body.apiKey || '').trim() || current.apiKey;
+        if (body.clearApiKey === true) apiKey = '';
+        store.setSetting('sharedAi', JSON.stringify({ endpoint, model, apiKey }));
+        sendJson(response, 200, { ok: true, ai: { endpoint, model, configured: Boolean(apiKey) } });
+        return;
+      }
       const activeMatch = pathname.match(/^\/api\/admin\/users\/(\d+)\/active$/);
       if (activeMatch && request.method === 'PATCH') { const body = await jsonBody(request); sendJson(response, 200, { ok: true, user: store.setUserActive(Number(activeMatch[1]), Boolean(body.active)) }); return; }
       const passwordMatch = pathname.match(/^\/api\/admin\/users\/(\d+)\/password$/);

@@ -53,7 +53,7 @@
 
 首次启动默认管理员为 `fpx`，本地开发默认密码为 `123456`；生产环境必须设置 `MOJUAN_ADMIN_PASSWORD`，否则服务不会启动。生产环境建议复制 `.env.example` 为部署环境变量来源，立即修改管理员账号和密码，并将 `MOJUAN_ALLOW_REGISTRATION=false`，由管理员在后台创建用户。管理员可在 `/api/admin/users` 管理账号、启停账号和重置密码；普通用户只能访问自己的 `/api/state`。
 
-后端接口包括：`/api/auth/login`、`/api/auth/register`、`/api/auth/logout`、`/api/me`、`GET/PUT /api/state`、`/api/admin/users`、`/api/admin/stats` 和 `/api/ai/chat/completions`。统一模型代理只在服务端读取 `MOJUAN_AI_API_KEY`，浏览器不会拿到管理员 Key；用户仍可在设置中填写个人 OpenAI 兼容 Key 覆盖统一配置。生产部署还应在反向代理启用 HTTPS、设置 `MOJUAN_COOKIE_SECURE=true`，并定期备份 `storage/mojuan.sqlite` 及其 `-wal` 文件。
+后端接口包括：`/api/auth/login`、`/api/auth/register`、`/api/auth/logout`、`/api/me`、`GET/PUT /api/state`、`/api/admin/users`、`/api/admin/stats`、管理员专用 `GET/PUT /api/admin/ai-config` 和 `/api/ai/chat/completions`。管理员可在“设置与模型”中保存全站共享的 OpenAI 兼容地址、模型和 API Key；配置写入服务端 SQLite metadata，Key 不会返回浏览器。所有账号都通过同源服务端代理调用共享模型，避免浏览器跨域失败。也可使用 `MOJUAN_AI_*` 环境变量作为初始默认配置。生产部署还应在反向代理启用 HTTPS、设置 `MOJUAN_COOKIE_SECURE=true`，并定期备份 `storage/mojuan.sqlite` 及其 `-wal` 文件。
 
 首次启动会把已有浏览器 `localStorage` 数据合并迁移到当前账号的 SQLite 记录；如果后端不可用，前端会回退到当前浏览器保存，但账号模式下建议修复后端连接再继续刷题，避免跨设备记录不同步。可通过 `MOJUAN_DB` 环境变量指定数据库路径。
 

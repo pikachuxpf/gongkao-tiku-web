@@ -294,6 +294,7 @@ textarea::placeholder { color: var(--line-dark); }
 .switch-line input:checked + .toggle-ui { background: var(--blue); }
 .switch-line input:checked + .toggle-ui::after { transform: translateX(18px); }
 .save-settings { margin-top: 15px; }
+.ai-config-status { margin: 8px 0 14px; color: var(--green); font-size: 12px; }
 .settings-notes { padding-top: 28px; }
 .note-paper { padding: 31px 25px 26px; border: 1px solid var(--line-dark); position: relative; background: #f7edc9; transform: rotate(1.2deg); box-shadow: 4px 5px 0 rgba(169, 157, 141, .15); }
 .note-paper::after { content: ''; position: absolute; inset: 4px -4px -4px 4px; border: 1px solid rgba(169,157,141,.5); z-index: -1; }

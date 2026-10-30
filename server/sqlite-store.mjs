@@ -328,6 +328,18 @@ export class SqliteStore {
     };
   }
 
+  getSetting(key) {
+    return this.db.prepare('SELECT value FROM metadata WHERE key = ?').get(`setting:${key}`)?.value ?? null;
+  }
+
+  setSetting(key, value) {
+    this.db.prepare('INSERT INTO metadata(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(`setting:${key}`, String(value));
+  }
+
+  deleteSetting(key) {
+    this.db.prepare('DELETE FROM metadata WHERE key = ?').run(`setting:${key}`);
+  }
+
   close() {
     this.db.close();
   }

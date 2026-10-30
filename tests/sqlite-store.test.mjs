@@ -68,3 +68,19 @@ test('fresh store bootstraps the requested default administrator', async () => {
   store.close();
   await fs.rm(directory, { recursive: true, force: true });
 });
+
+test('shared settings persist in metadata and can be removed', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'mojuan-settings-'));
+  const file = path.join(directory, 'settings.sqlite');
+  const store = await openSqliteStore(file);
+  store.setSetting('sharedAi', JSON.stringify({ endpoint: 'https://example.test/v1', model: 'model-x', apiKey: 'never-returned' }));
+  assert.equal(JSON.parse(store.getSetting('sharedAi')).model, 'model-x');
+  store.close();
+
+  const reopened = await openSqliteStore(file);
+  assert.equal(JSON.parse(reopened.getSetting('sharedAi')).apiKey, 'never-returned');
+  reopened.deleteSetting('sharedAi');
+  assert.equal(reopened.getSetting('sharedAi'), null);
+  reopened.close();
+  await fs.rm(directory, { recursive: true, force: true });
+});
