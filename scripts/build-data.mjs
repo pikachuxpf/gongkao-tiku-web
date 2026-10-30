@@ -8,8 +8,9 @@ const xingceRootName = '行测题库';
 const gongjiRootName = '公基题库';
 const gongjiTruthRoot = path.join(root, gongjiRootName, '真题');
 const outputRoot = path.join(root, 'public', 'data');
-const questionsRoot = path.join(outputRoot, 'questions');
+const detailsRoot = path.join(outputRoot, 'details');
 const indexPath = path.join(outputRoot, 'index.json');
+const summariesRoot = path.join(outputRoot, 'summaries');
 const knowledgeIndexPath = path.join(root, '智能系统', '知识库索引', 'questions_index.jsonl');
 const xingceImageRoot = path.join(root, xingceRootName, '90-图片');
 const xingceImageOutput = path.join(outputRoot, 'xingce-images');
@@ -73,6 +74,22 @@ function questionId(relativePath, meta, title) {
 
 function stableId(prefix, ...parts) {
   return `${prefix}-${crypto.createHash('sha1').update(parts.join('\n')).digest('hex').slice(0, 16)}`;
+}
+
+function detailChunkName(question) {
+  const key = [question.subject, question.category, question.year || 'all'].join('\n');
+  return `chunk-${crypto.createHash('sha1').update(key).digest('hex').slice(0, 12)}.json`;
+}
+
+const subjectFileNames = {
+  申论: 'shenlun',
+  综应: 'zongying',
+  行测: 'xingce',
+  公基: 'gongji',
+};
+
+function summaryFileName(subject) {
+  return subjectFileNames[subject] || crypto.createHash('sha1').update(subject).digest('hex').slice(0, 12);
 }
 
 function parseNumber(value, fallback = 0) {
@@ -176,9 +193,10 @@ function parseXingceQuestions(text, relativePath) {
       ...option,
       text: rewriteXingceAssets(option.text, relativePath),
     }));
-    const id = `xingce-${qid}`.replace(/[^\w-]/g, '-');
+    const id = stableId('xingce', relativePath, qid, index);
     questions.push({
       id,
+      upstreamQid: qid,
       subject: '行测',
       category: module,
       module,
@@ -333,24 +351,42 @@ async function loadEnrichment() {
 }
 
 await fs.rm(outputRoot, { recursive: true, force: true });
-await fs.mkdir(questionsRoot, { recursive: true });
+await fs.mkdir(detailsRoot, { recursive: true });
+await fs.mkdir(summariesRoot, { recursive: true });
 const enriched = await loadEnrichment();
 const files = [];
 for (const sourceRoot of sourceRoots) files.push(...await readFiles(path.join(root, sourceRoot)));
 
 const questions = [];
-for (const file of files) {
-  const relativePath = path.relative(root, file);
-  const text = await fs.readFile(file, 'utf8');
-  const question = makeQuestion(text, relativePath, enriched);
-  const fullPath = path.join(questionsRoot, `${question.id}.json`);
-  const payload = { ...question, generatedAt: new Date().toISOString() };
-  await fs.writeFile(fullPath, JSON.stringify(payload));
-  const { material, answer, demo, ...summary } = question;
+const detailGroups = new Map();
+const generatedAt = new Date().toISOString();
+
+function addQuestion(question) {
+  const detailChunk = `details/${detailChunkName(question)}`;
+  const groupKey = detailChunk;
+  if (!detailGroups.has(groupKey)) detailGroups.set(groupKey, []);
+  detailGroups.get(groupKey).push(question);
+  const {
+    material,
+    answer,
+    demo,
+    stem,
+    explanation,
+    options,
+    ...summary
+  } = question;
+  summary.detailChunk = detailChunk;
   summary.materialLength = material.length;
   summary.answerLength = answer.length;
   summary.demoLength = demo.length;
+  if (explanation !== undefined) summary.explanationLength = explanation.length;
   questions.push(summary);
+}
+
+for (const file of files) {
+  const relativePath = path.relative(root, file);
+  const text = await fs.readFile(file, 'utf8');
+  addQuestion(makeQuestion(text, relativePath, enriched));
 }
 
 const xingceFiles = await readFiles(path.join(root, xingceRootName));
@@ -358,17 +394,7 @@ for (const file of xingceFiles) {
   if (file.includes(`${path.sep}90-图片${path.sep}`)) continue;
   const relativePath = path.relative(root, file);
   const text = await fs.readFile(file, 'utf8');
-  for (const question of parseXingceQuestions(text, relativePath)) {
-    const fullPath = path.join(questionsRoot, `${question.id}.json`);
-    const payload = { ...question, generatedAt: new Date().toISOString() };
-    await fs.writeFile(fullPath, JSON.stringify(payload));
-    const { material, answer, demo, explanation, ...summary } = question;
-    summary.materialLength = material.length;
-    summary.answerLength = answer.length;
-    summary.demoLength = demo.length;
-    summary.explanationLength = explanation.length;
-    questions.push(summary);
-  }
+  for (const question of parseXingceQuestions(text, relativePath)) addQuestion(question);
 }
 
 try {
@@ -384,31 +410,46 @@ try {
   for (const file of gongjiFiles) {
     const relativePath = path.relative(root, file);
     const text = await fs.readFile(file, 'utf8');
-    for (const question of parseGongjiQuestions(text, relativePath)) {
-      const fullPath = path.join(questionsRoot, `${question.id}.json`);
-      const payload = { ...question, generatedAt: new Date().toISOString() };
-      await fs.writeFile(fullPath, JSON.stringify(payload));
-      const { material, answer, demo, explanation, ...summary } = question;
-      summary.materialLength = material.length;
-      summary.answerLength = answer.length;
-      summary.demoLength = demo.length;
-      summary.explanationLength = explanation.length;
-      questions.push(summary);
-    }
+    for (const question of parseGongjiQuestions(text, relativePath)) addQuestion(question);
   }
 } catch (error) {
   if (error.code !== 'ENOENT') throw error;
   // The optional public-bank directory may be absent in a minimal clone.
 }
 
+for (const [detailChunk, items] of detailGroups) {
+  const payload = {
+    version: 1,
+    generatedAt,
+    questions: Object.fromEntries(items.map((item) => [item.id, item])),
+  };
+  await fs.writeFile(path.join(outputRoot, detailChunk), JSON.stringify(payload));
+}
+
 questions.sort((a, b) => a.subject.localeCompare(b.subject, 'zh-CN') || a.category.localeCompare(b.category, 'zh-CN') || a.id.localeCompare(b.id));
+const summaryFiles = {};
+const subjectCounts = {};
+const categoryCounts = {};
+for (const subject of [...new Set(questions.map((item) => item.subject))]) {
+  const fileName = `summaries/${summaryFileName(subject)}.json`;
+  const subjectQuestions = questions.filter((item) => item.subject === subject);
+  summaryFiles[subject] = fileName;
+  subjectCounts[subject] = subjectQuestions.length;
+  categoryCounts[subject] = {};
+  for (const question of subjectQuestions) categoryCounts[subject][question.category] = (categoryCounts[subject][question.category] || 0) + 1;
+  await fs.writeFile(path.join(outputRoot, fileName), JSON.stringify({ version: 1, subject, questions: subjectQuestions }));
+}
 const manifest = {
-  version: 1,
-  generatedAt: new Date().toISOString(),
+  version: 3,
+  detailFormat: 'chunked-v1',
+  summaryFormat: 'subject-v1',
+  generatedAt,
   total: questions.length,
   subjects: [...new Set(questions.map((item) => item.subject))],
   modes: [...new Set(questions.map((item) => item.mode))],
-  questions,
+  subjectCounts,
+  categoryCounts,
+  summaryFiles,
 };
 await fs.writeFile(indexPath, JSON.stringify(manifest));
 console.log(`Built ${questions.length} questions into ${path.relative(root, outputRoot)}`);
