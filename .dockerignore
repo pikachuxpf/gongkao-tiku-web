@@ -1,0 +1,14 @@
+.git
+.source
+.playwright-mcp
+artifacts
+node_modules
+dist
+public/data
+storage
+tests
+*.sqlite
+*.sqlite-*
+.env
+.env.*
+!.env.example

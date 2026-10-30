@@ -57,6 +57,10 @@
 
 首次启动会把已有浏览器 `localStorage` 数据合并迁移到当前账号的 SQLite 记录；如果后端不可用，前端会回退到当前浏览器保存，但账号模式下建议修复后端连接再继续刷题，避免跨设备记录不同步。可通过 `MOJUAN_DB` 环境变量指定数据库路径。
 
+### Docker 生产部署
+
+仓库提供 `Dockerfile` 和 `docker-compose.yml`。首次部署前创建仅服务器可读的 `.env`，至少设置 `MOJUAN_ADMIN_PASSWORD` 为随机强密码；服务默认关闭公开注册、强制安全 Cookie，并把 SQLite 持久化在 `./data/mojuan.sqlite`。题库数据在镜像构建时从 Markdown 源文件生成，SQLite 和本地 `.env` 不会打入镜像。
+
 > 数据来源：粉笔题库（个人备考用）。
 
 

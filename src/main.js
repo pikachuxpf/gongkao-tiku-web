@@ -1,4 +1,5 @@
 import { createIcons, icons } from 'lucide';
+import { sortQuestions } from './question-order.mjs';
 import './styles.css';
 
 const STORAGE_KEY = 'mojuan.practice.v1';
@@ -15,6 +16,7 @@ const state = {
   manifest: null,
   question: null,
   questionLoading: false,
+  questionRequest: 0,
   summaryLoading: false,
   detailChunks: new Map(),
   summaries: new Map(),
@@ -385,10 +387,24 @@ function showToast(message) {
 
 function categories() {
   const subject = state.filters.subject;
-  return [...new Set(loadedQuestions()
-    .filter((item) => subject === '全部' || item.subject === subject)
-    .map((item) => item.category))]
-    .sort((a, b) => a.localeCompare(b, 'zh-CN'));
+  const subjectCounts = state.manifest?.categoryCounts || {};
+  const counts = subject === '全部'
+    ? Object.values(subjectCounts).reduce((all, items) => {
+      for (const [category, count] of Object.entries(items)) all[category] = (all[category] || 0) + count;
+      return all;
+    }, {})
+    : subjectCounts[subject] || {};
+  const available = Object.keys(counts);
+  return available.sort((a, b) => (counts[b] || 0) - (counts[a] || 0) || a.localeCompare(b, 'zh-CN'));
+}
+
+function categoryCounts() {
+  const subjectCounts = state.manifest?.categoryCounts || {};
+  if (state.filters.subject !== '全部') return subjectCounts[state.filters.subject] || {};
+  return Object.values(subjectCounts).reduce((all, items) => {
+    for (const [category, count] of Object.entries(items)) all[category] = (all[category] || 0) + count;
+    return all;
+  }, {});
 }
 
 function subjectCount(subject) {
@@ -431,13 +447,18 @@ async function loadSummaries(subject = '全部') {
 
 function filteredQuestions() {
   const search = state.filters.search.trim().toLowerCase();
-  return loadedQuestions().filter((item) => {
+  return sortQuestions(loadedQuestions().filter((item) => {
     const categoryMatch = state.filters.category === '全部' || item.category === state.filters.category;
     const subjectMatch = state.filters.subject === '全部' || item.subject === state.filters.subject;
     const modeMatch = state.filters.mode === '全部' || item.mode === state.filters.mode;
     const searchMatch = !search || `${item.title} ${item.detailType} ${item.themes?.join(' ')}`.toLowerCase().includes(search);
     return categoryMatch && subjectMatch && modeMatch && searchMatch;
-  });
+  }));
+}
+
+function invalidateQuestionLoad() {
+  state.questionRequest += 1;
+  state.questionLoading = false;
 }
 
 function counts() {
@@ -473,6 +494,7 @@ async function loadManifest() {
 
 async function loadQuestion(id) {
   if (!id) return;
+  const requestId = ++state.questionRequest;
   state.questionLoading = true;
   render();
   try {
@@ -487,16 +509,19 @@ async function loadQuestion(id) {
     }
     const question = chunk.questions?.[id];
     if (!question) throw new Error('题目详情不存在，请重新构建题库');
+    if (requestId !== state.questionRequest) return;
     state.question = question;
     state.loadedAnswer = false;
     state.submitted = Boolean(store.completed[id]);
     state.aiResult = null;
     state.practiceText = store.answers[id]?.text || '';
   } catch (error) {
-    showToast(error.message || '题目详情加载失败');
+    if (requestId === state.questionRequest) showToast(error.message || '题目详情加载失败');
   } finally {
-    state.questionLoading = false;
-    render();
+    if (requestId === state.questionRequest) {
+      state.questionLoading = false;
+      render();
+    }
   }
 }
 
@@ -750,12 +775,17 @@ function questionRow(question, index = 0) {
 }
 
 function filterBar() {
-  return `<div class="filter-bar"><label class="search-field">${icon('search')}<input data-input="search" value="${escapeHtml(state.filters.search)}" placeholder="搜题干、题型或主题" /></label><select data-input="subject"><option>全部</option><option ${state.filters.subject === '申论' ? 'selected' : ''}>申论</option><option ${state.filters.subject === '综应' ? 'selected' : ''}>综应</option><option ${state.filters.subject === '行测' ? 'selected' : ''}>行测</option><option ${state.filters.subject === '公基' ? 'selected' : ''}>公基</option></select><select data-input="category"><option>全部</option>${categories().map((category) => `<option ${state.filters.category === category ? 'selected' : ''}>${escapeHtml(category)}</option>`).join('')}</select><select data-input="mode"><option value="全部">全部形式</option><option value="subjective" ${state.filters.mode === 'subjective' ? 'selected' : ''}>主观题</option><option value="choice" ${state.filters.mode === 'choice' ? 'selected' : ''}>选择题</option></select></div>`;
+  const subjectCounts = categoryCounts();
+  const categoryOptions = categories();
+  return `<div class="filter-bar"><label class="search-field">${icon('search')}<input data-input="search" value="${escapeHtml(state.filters.search)}" placeholder="搜题干、题型或主题" /></label><select data-input="subject"><option>全部</option><option ${state.filters.subject === '申论' ? 'selected' : ''}>申论</option><option ${state.filters.subject === '综应' ? 'selected' : ''}>综应</option><option ${state.filters.subject === '行测' ? 'selected' : ''}>行测</option><option ${state.filters.subject === '公基' ? 'selected' : ''}>公基</option></select><select data-input="category"><option>全部类别</option>${categoryOptions.map((category) => `<option value="${escapeHtml(category)}" ${state.filters.category === category ? 'selected' : ''}>${escapeHtml(category)} · ${(subjectCounts[category] || 0).toLocaleString()}</option>`).join('')}</select><select data-input="mode"><option value="全部">全部形式</option><option value="subjective" ${state.filters.mode === 'subjective' ? 'selected' : ''}>主观题</option><option value="choice" ${state.filters.mode === 'choice' ? 'selected' : ''}>选择题</option></select></div>${categoryOptions.length ? `<nav class="category-picker" aria-label="题目类别"><button class="category-chip ${state.filters.category === '全部' ? 'selected' : ''}" data-action="category" data-category="全部">全部类别 <span>${(state.filters.subject === '全部' ? state.manifest?.total : subjectCount(state.filters.subject))?.toLocaleString() || 0}</span></button>${categoryOptions.map((category) => `<button class="category-chip ${state.filters.category === category ? 'selected' : ''}" data-action="category" data-category="${escapeHtml(category)}">${escapeHtml(category)} <span>${(subjectCounts[category] || 0).toLocaleString()}</span></button>`).join('')}</nav>` : ''}`;
 }
 
 function renderPractice() {
   const list = filteredQuestions();
-  if (!list.length && !state.summaryLoading && state.filters.subject !== '全部' && !state.summaries.has(state.filters.subject)) {
+  const needsAllSummaries = state.filters.subject === '全部'
+    ? state.manifest?.subjects.some((subject) => !state.summaries.has(subject))
+    : !state.summaries.has(state.filters.subject);
+  if (needsAllSummaries && !state.summaryLoading) {
     queueMicrotask(() => loadSummaries(state.filters.subject));
   }
   if (!state.question && !state.questionLoading && list.length) {
@@ -887,6 +917,8 @@ function handleAction(target) {
   } else if (action === 'subject') {
     state.filters.subject = state.filters.subject === target.dataset.subject ? '全部' : target.dataset.subject;
     state.filters.category = '全部';
+    state.filters.mode = '全部';
+    state.filters.search = '';
     state.view = 'practice';
     location.hash = 'practice';
     prepareQueue(filteredQuestions());
@@ -899,6 +931,8 @@ function handleAction(target) {
     state.filters.search = '';
     state.view = 'practice';
     location.hash = 'practice';
+    invalidateQuestionLoad();
+    state.question = null;
     state.queue = filteredQuestions();
     state.queueIndex = 0;
     render();
@@ -914,6 +948,13 @@ function handleAction(target) {
     state.view = 'practice';
     location.hash = 'practice';
     loadQuestion(item?.id || target.dataset.id);
+  } else if (action === 'category') {
+    state.filters.category = target.dataset.category || '全部';
+    invalidateQuestionLoad();
+    prepareQueue(filteredQuestions());
+    state.question = null;
+    state.submitted = false;
+    render();
   } else if (action === 'favorite') toggleFavorite(state.question?.id);
   else if (action === 'submit') submitAnswer();
   else if (action === 'clear-answer') resetAnswer();
@@ -946,9 +987,16 @@ app.addEventListener('change', (event) => {
   const input = event.target;
   if (input.dataset.input === 'subject' || input.dataset.input === 'category' || input.dataset.input === 'mode') {
     state.filters[input.dataset.input] = input.value;
+    if (input.dataset.input === 'subject') {
+      state.filters.category = '全部';
+      state.filters.search = '';
+    }
+    invalidateQuestionLoad();
     prepareQueue(filteredQuestions());
     state.question = null;
+    state.submitted = false;
     render();
+    if (input.dataset.input === 'subject' && state.filters.subject !== '全部') loadSummaries(state.filters.subject);
     return;
   }
   if (input.name === 'choice' && state.question) {

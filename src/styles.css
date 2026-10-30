@@ -155,6 +155,11 @@ h3 { margin-bottom: 0; font-size: 18px; }
 .search-field svg { width: 14px; height: 14px; }
 .search-field input { width: 100%; border: 0; outline: 0; color: var(--ink); background: transparent; font-size: 11px; }
 .search-field input::placeholder { color: var(--line-dark); }
+.category-picker { margin: -2px 0 20px; display: flex; flex-wrap: wrap; gap: 7px; }
+.category-chip { min-height: 33px; padding: 6px 9px; display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); color: var(--ink-soft); background: transparent; font-size: 11px; }
+.category-chip span { color: var(--line-dark); font-size: 10px; font-variant-numeric: tabular-nums; }
+.category-chip:hover, .category-chip.selected { border-color: var(--red); color: var(--ink); background: rgba(193, 95, 60, .08); }
+.category-chip.selected span { color: var(--red); }
 .question-paper { padding: clamp(22px, 4vw, 46px); border: 1px solid var(--line-dark); position: relative; background: var(--paper-light); box-shadow: 5px 5px 0 rgba(169, 157, 141, .19); }
 .question-paper::after { content: ''; position: absolute; inset: 5px -5px -5px 5px; border: 1px solid var(--line); z-index: -1; }
 .paper-topline { padding-bottom: 13px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; color: var(--ink-soft); font-size: 10px; }

@@ -29,7 +29,12 @@ test('generated manifest exposes portable summary data', async () => {
     const manifest = JSON.parse(await fs.readFile(file, 'utf8'));
     assert.equal(manifest.version, 3);
     assert.equal(manifest.summaryFormat, 'subject-v1');
+    assert.equal(manifest.total, 73364);
     assert.equal(Object.values(manifest.subjectCounts).reduce((sum, count) => sum + count, 0), manifest.total);
+    assert.deepEqual(manifest.subjectCounts, { '申论': 3852, '公基': 9588, '综应': 1034, '行测': 58890 });
+    for (const [subject, counts] of Object.entries(manifest.categoryCounts)) {
+      assert.equal(Object.values(counts).reduce((sum, count) => sum + count, 0), manifest.subjectCounts[subject]);
+    }
     const summaries = [];
     for (const subject of manifest.subjects) {
       const summary = JSON.parse(await fs.readFile(path.join(root, 'public', 'data', manifest.summaryFiles[subject]), 'utf8'));
