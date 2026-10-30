@@ -418,30 +418,31 @@ function loadedQuestions() {
 async function loadSummaries(subject = '全部') {
   if (!state.manifest?.summaryFiles) return;
   const subjects = subject === '全部' ? state.manifest.subjects : [subject];
-  const missing = subjects.filter((item) => !state.summaries.has(item) && !state.summaryPromises.has(item));
-  if (!missing.length) return;
-  state.summaryLoading = true;
-  render();
-  try {
-    await Promise.all(missing.map(async (item) => {
-      const promise = fetch(`/data/${state.manifest.summaryFiles[item]}`)
+  const pending = subjects.filter((item) => !state.summaries.has(item));
+  if (!pending.length) return;
+  const promises = pending.map((item) => {
+    let promise = state.summaryPromises.get(item);
+    if (!promise) {
+      promise = fetch(`/data/${state.manifest.summaryFiles[item]}`)
         .then((response) => {
           if (!response.ok) throw new Error(`题库摘要加载失败（${response.status}）`);
           return response.json();
         })
-        .then((summary) => state.summaries.set(item, summary));
+        .then((summary) => state.summaries.set(item, summary))
+        .finally(() => state.summaryPromises.delete(item));
       state.summaryPromises.set(item, promise);
-      try {
-        await promise;
-      } finally {
-        state.summaryPromises.delete(item);
-      }
-    }));
+    }
+    return promise;
+  });
+  state.summaryLoading = true;
+  render();
+  try {
+    await Promise.all(promises);
   } catch (error) {
     showToast(error.message || '题库摘要加载失败');
   } finally {
-    state.summaryLoading = false;
-    render();
+    state.summaryLoading = state.summaryPromises.size > 0;
+    if (!state.summaryLoading) render();
   }
 }
 
@@ -459,6 +460,42 @@ function filteredQuestions() {
 function invalidateQuestionLoad() {
   state.questionRequest += 1;
   state.questionLoading = false;
+}
+
+function resetQuestionState() {
+  invalidateQuestionLoad();
+  state.question = null;
+  state.submitted = false;
+  state.loadedAnswer = false;
+  state.aiResult = null;
+  state.practiceText = '';
+}
+
+async function applyPracticeFilters({ subjectChanged = false } = {}) {
+  const requestId = ++state.questionRequest;
+  state.questionLoading = true;
+  state.question = null;
+  state.submitted = false;
+  state.loadedAnswer = false;
+  state.aiResult = null;
+  state.practiceText = '';
+  state.view = 'practice';
+  location.hash = 'practice';
+  state.queue = [];
+  state.queueIndex = 0;
+  render();
+
+  await loadSummaries(state.filters.subject);
+  if (requestId !== state.questionRequest) return;
+  state.queue = filteredQuestions();
+  state.queueIndex = 0;
+  if (state.queue.length) {
+    await loadQuestion(state.queue[0].id);
+  } else {
+    state.questionLoading = false;
+    render();
+    if (subjectChanged) showToast('这个题库暂时没有可用题目');
+  }
 }
 
 function counts() {
@@ -777,7 +814,7 @@ function questionRow(question, index = 0) {
 function filterBar() {
   const subjectCounts = categoryCounts();
   const categoryOptions = categories();
-  return `<div class="filter-bar"><label class="search-field">${icon('search')}<input data-input="search" value="${escapeHtml(state.filters.search)}" placeholder="搜题干、题型或主题" /></label><select data-input="subject"><option>全部</option><option ${state.filters.subject === '申论' ? 'selected' : ''}>申论</option><option ${state.filters.subject === '综应' ? 'selected' : ''}>综应</option><option ${state.filters.subject === '行测' ? 'selected' : ''}>行测</option><option ${state.filters.subject === '公基' ? 'selected' : ''}>公基</option></select><select data-input="category"><option>全部类别</option>${categoryOptions.map((category) => `<option value="${escapeHtml(category)}" ${state.filters.category === category ? 'selected' : ''}>${escapeHtml(category)} · ${(subjectCounts[category] || 0).toLocaleString()}</option>`).join('')}</select><select data-input="mode"><option value="全部">全部形式</option><option value="subjective" ${state.filters.mode === 'subjective' ? 'selected' : ''}>主观题</option><option value="choice" ${state.filters.mode === 'choice' ? 'selected' : ''}>选择题</option></select></div>${categoryOptions.length ? `<nav class="category-picker" aria-label="题目类别"><button class="category-chip ${state.filters.category === '全部' ? 'selected' : ''}" data-action="category" data-category="全部">全部类别 <span>${(state.filters.subject === '全部' ? state.manifest?.total : subjectCount(state.filters.subject))?.toLocaleString() || 0}</span></button>${categoryOptions.map((category) => `<button class="category-chip ${state.filters.category === category ? 'selected' : ''}" data-action="category" data-category="${escapeHtml(category)}">${escapeHtml(category)} <span>${(subjectCounts[category] || 0).toLocaleString()}</span></button>`).join('')}</nav>` : ''}`;
+  return `<div class="filter-bar"><label class="search-field">${icon('search')}<input data-input="search" value="${escapeHtml(state.filters.search)}" placeholder="搜题干、题型或主题" /></label><select data-input="subject"><option>全部</option><option ${state.filters.subject === '申论' ? 'selected' : ''}>申论</option><option ${state.filters.subject === '综应' ? 'selected' : ''}>综应</option><option ${state.filters.subject === '行测' ? 'selected' : ''}>行测</option><option ${state.filters.subject === '公基' ? 'selected' : ''}>公基</option></select><select data-input="category"><option value="全部" ${state.filters.category === '全部' ? 'selected' : ''}>全部类别</option>${categoryOptions.map((category) => `<option value="${escapeHtml(category)}" ${state.filters.category === category ? 'selected' : ''}>${escapeHtml(category)} · ${(subjectCounts[category] || 0).toLocaleString()}</option>`).join('')}</select><select data-input="mode"><option value="全部" ${state.filters.mode === '全部' ? 'selected' : ''}>全部形式</option><option value="subjective" ${state.filters.mode === 'subjective' ? 'selected' : ''}>主观题</option><option value="choice" ${state.filters.mode === 'choice' ? 'selected' : ''}>选择题</option></select></div>${categoryOptions.length ? `<nav class="category-picker" aria-label="题目类别"><button class="category-chip ${state.filters.category === '全部' ? 'selected' : ''}" data-action="category" data-category="全部">全部类别 <span>${(state.filters.subject === '全部' ? state.manifest?.total : subjectCount(state.filters.subject))?.toLocaleString() || 0}</span></button>${categoryOptions.map((category) => `<button class="category-chip ${state.filters.category === category ? 'selected' : ''}" data-action="category" data-category="${escapeHtml(category)}">${escapeHtml(category)} <span>${(subjectCounts[category] || 0).toLocaleString()}</span></button>`).join('')}</nav>` : ''}`;
 }
 
 function renderPractice() {
@@ -807,6 +844,9 @@ function loadingCard() {
 }
 
 function selectionCard() {
+  if (state.filters.search || state.filters.category !== '全部' || state.filters.mode !== '全部') {
+    return `<div class="loading-card"><div class="scribble-loader">${icon('search-x')}</div><p>没有找到符合条件的题目，试试调整筛选。</p></div>`;
+  }
   return `<div class="loading-card"><div class="scribble-loader">${icon('book-open')}</div><p>先在上方选择一个题库，再开始刷题。</p></div>`;
 }
 
@@ -919,28 +959,13 @@ function handleAction(target) {
     state.filters.category = '全部';
     state.filters.mode = '全部';
     state.filters.search = '';
-    state.view = 'practice';
-    location.hash = 'practice';
-    prepareQueue(filteredQuestions());
-    loadSummaries(state.filters.subject);
-    render();
+    applyPracticeFilters({ subjectChanged: true });
   } else if (action === 'quick-start') {
     state.filters.subject = target.dataset.subject || '全部';
     state.filters.mode = target.dataset.mode || '全部';
     state.filters.category = '全部';
     state.filters.search = '';
-    state.view = 'practice';
-    location.hash = 'practice';
-    invalidateQuestionLoad();
-    state.question = null;
-    state.queue = filteredQuestions();
-    state.queueIndex = 0;
-    render();
-    loadSummaries(state.filters.subject).then(() => {
-      state.queue = filteredQuestions();
-      state.queueIndex = 0;
-      loadQuestion(state.queue[0]?.id);
-    });
+    applyPracticeFilters({ subjectChanged: true });
   } else if (action === 'open-question') {
     const item = loadedQuestions().find((q) => q.id === target.dataset.id);
     state.queue = filteredQuestions();
@@ -950,11 +975,7 @@ function handleAction(target) {
     loadQuestion(item?.id || target.dataset.id);
   } else if (action === 'category') {
     state.filters.category = target.dataset.category || '全部';
-    invalidateQuestionLoad();
-    prepareQueue(filteredQuestions());
-    state.question = null;
-    state.submitted = false;
-    render();
+    applyPracticeFilters();
   } else if (action === 'favorite') toggleFavorite(state.question?.id);
   else if (action === 'submit') submitAnswer();
   else if (action === 'clear-answer') resetAnswer();
@@ -979,7 +1000,13 @@ app.addEventListener('input', (event) => {
   } else if (input.dataset.input === 'search') {
     state.filters.search = input.value;
     prepareQueue(filteredQuestions());
-    render();
+    if (!state.queue.some((item) => item.id === state.question?.id)) {
+      resetQuestionState();
+      if (state.queue.length) selectFromQueue();
+      else render();
+    } else {
+      render();
+    }
   }
 });
 
@@ -987,16 +1014,14 @@ app.addEventListener('change', (event) => {
   const input = event.target;
   if (input.dataset.input === 'subject' || input.dataset.input === 'category' || input.dataset.input === 'mode') {
     state.filters[input.dataset.input] = input.value;
+    if (input.dataset.input === 'category' && input.value === '全部类别') {
+      state.filters.category = '全部';
+    }
     if (input.dataset.input === 'subject') {
       state.filters.category = '全部';
       state.filters.search = '';
     }
-    invalidateQuestionLoad();
-    prepareQueue(filteredQuestions());
-    state.question = null;
-    state.submitted = false;
-    render();
-    if (input.dataset.input === 'subject' && state.filters.subject !== '全部') loadSummaries(state.filters.subject);
+    applyPracticeFilters({ subjectChanged: input.dataset.input === 'subject' });
     return;
   }
   if (input.name === 'choice' && state.question) {
