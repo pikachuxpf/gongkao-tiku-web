@@ -31,3 +31,30 @@ test('sqlite store persists practice state in normalized tables', async () => {
   reopened.close();
   await fs.rm(directory, { recursive: true, force: true });
 });
+
+test('sqlite store isolates users and supports administrator lifecycle', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'mojuan-users-'));
+  const file = path.join(directory, 'users.sqlite');
+  const store = await openSqliteStore(file, {
+    admin: { username: 'root', password: 'root-password-123', displayName: 'Root' },
+    sessionTtlMs: 60_000,
+  });
+
+  const admin = store.authenticate('root', 'root-password-123');
+  assert.equal(admin.role, 'admin');
+  const user = store.createUser({ username: 'student', password: 'student-password-123', displayName: '练习者' });
+  assert.equal(store.authenticate('student', 'student-password-123').id, user.id);
+  assert.equal(store.authenticate('student', 'wrong-password'), null);
+
+  store.write(admin.id, { favorites: { adminQuestion: { at: 1 } } });
+  store.write(user.id, { favorites: { userQuestion: { at: 2 } } });
+  assert.deepEqual(Object.keys(store.read(admin.id).favorites), ['adminQuestion']);
+  assert.deepEqual(Object.keys(store.read(user.id).favorites), ['userQuestion']);
+
+  const token = store.createSession(user.id);
+  assert.equal(store.getUserBySession(token).username, 'student');
+  store.setUserActive(user.id, false);
+  assert.equal(store.getUserBySession(token), null);
+  store.close();
+  await fs.rm(directory, { recursive: true, force: true });
+});

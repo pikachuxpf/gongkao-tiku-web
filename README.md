@@ -19,7 +19,7 @@
 仓库现在包含一个可直接运行的 Vite Web 应用：
 
 - `npm install` 安装依赖
-- `npm run dev` 启动轻量本地练习工作台（不监听海量题库文件，并启用 SQLite 状态保存）
+- `npm run dev` 启动轻量本地练习工作台（不监听海量题库文件，并启用多用户 SQLite 后端）
 - `npm run build` 重新扫描 Markdown 题库并生成生产包
 - `npm test` 校验题库数量和生成的题目索引
 
@@ -44,11 +44,15 @@
 
 行测和公基都采用“源文件目录 + 构建索引”的方式：行测将上游 Markdown 原样保留在 `行测题库/`，公基真题按年份保留在 `公基题库/真题/`。后续增量添加时只需追加对应源文件，再运行 `npm run build`；日常启动 `npm run dev` 会复用已有生产包，不会每次扫描全部源文件。
 
-### 本地后端与 SQLite
+### 多用户后端与 SQLite
 
-本地服务使用 Node 内置 SQLite，将完成记录、收藏、错题、答案草稿和刷题会话保存到 `storage/mojuan.sqlite`。题库正文仍由静态分块文件按需读取，SQLite 不承载大体量题库，因此启动和查询都保持轻量。首次启动会把已有浏览器 `localStorage` 数据合并迁移到 SQLite；如果后端不可用，前端会自动回退到浏览器本地保存。可通过 `MOJUAN_DB` 环境变量指定数据库路径。
+本地服务使用 Node 内置 SQLite，将账号、会话、完成记录、收藏、错题、答案草稿和刷题会话保存到 `storage/mojuan.sqlite`。题库正文仍由静态分块文件按需读取，SQLite 不承载大体量题库，因此启动和查询都保持轻量。每个账号使用 `user_id` 隔离学习数据，密码使用 `scrypt` 哈希保存，登录使用 HttpOnly 会话 Cookie。旧版本只有 `completed`、`favorites`、`mistakes`、`answers`、`sessions` 的数据库会在首次启动时自动迁移到默认管理员账号。
 
-当前后端接口为 `GET /api/health`、`GET /api/state` 和 `PUT /api/state`，适合个人本机使用。若要多人公网部署，还需要增加登录鉴权、用户隔离、请求限流和服务端 API Key 代理。
+首次启动默认管理员为 `admin`，本地开发默认密码为 `admin12345`；生产环境必须设置 `MOJUAN_ADMIN_PASSWORD`，否则服务不会启动。生产环境建议复制 `.env.example` 为部署环境变量来源，修改管理员账号和密码，并将 `MOJUAN_ALLOW_REGISTRATION=false`，由管理员在后台创建用户。管理员可在 `/api/admin/users` 管理账号、启停账号和重置密码；普通用户只能访问自己的 `/api/state`。
+
+后端接口包括：`/api/auth/login`、`/api/auth/register`、`/api/auth/logout`、`/api/me`、`GET/PUT /api/state`、`/api/admin/users`、`/api/admin/stats` 和 `/api/ai/chat/completions`。统一模型代理只在服务端读取 `MOJUAN_AI_API_KEY`，浏览器不会拿到管理员 Key；用户仍可在设置中填写个人 OpenAI 兼容 Key 覆盖统一配置。生产部署还应在反向代理启用 HTTPS、设置 `MOJUAN_COOKIE_SECURE=true`，并定期备份 `storage/mojuan.sqlite` 及其 `-wal` 文件。
+
+首次启动会把已有浏览器 `localStorage` 数据合并迁移到当前账号的 SQLite 记录；如果后端不可用，前端会回退到当前浏览器保存，但账号模式下建议修复后端连接再继续刷题，避免跨设备记录不同步。可通过 `MOJUAN_DB` 环境变量指定数据库路径。
 
 > 数据来源：粉笔题库（个人备考用）。
 

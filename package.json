@@ -8,6 +8,7 @@
   },
   "scripts": {
     "dev": "node scripts/ensure-data.mjs && node scripts/serve-local.mjs",
+    "start": "node scripts/ensure-data.mjs && node scripts/serve-local.mjs",
     "build:data": "node scripts/build-data.mjs",
     "build": "npm run build:data && vite build",
     "preview": "vite preview",

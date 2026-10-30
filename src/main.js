@@ -30,6 +30,12 @@ const state = {
   toast: '',
   practiceText: '',
   storage: 'browser',
+  user: null,
+  config: { registration: false, ai: { configured: false, model: DEFAULT_SETTINGS.model } },
+  authError: '',
+  authMode: 'login',
+  adminUsers: [],
+  adminStats: null,
 };
 
 const store = loadJson(STORAGE_KEY, {
@@ -53,8 +59,44 @@ function loadJson(key, fallback) {
 }
 
 function persist() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+  localStorage.setItem(`${STORAGE_KEY}.${state.user?.id || 'legacy'}`, JSON.stringify(store));
   if (state.storage === 'sqlite') scheduleStorageSync();
+}
+
+async function apiJson(url, options = {}) {
+  const response = await fetch(url, { ...options, credentials: 'same-origin' });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || `请求失败（${response.status}）`);
+  return payload;
+}
+
+async function initAuth() {
+  try {
+    const configPayload = await apiJson('/api/config', { cache: 'no-store' });
+    state.config = configPayload;
+    const me = await apiJson('/api/me', { cache: 'no-store' });
+    if (!me.user) {
+      state.user = null;
+      state.authError = '';
+      return;
+    }
+    state.user = me.user;
+    settings = { ...DEFAULT_SETTINGS, ...loadJson(`${SETTINGS_KEY}.${state.user.id}`, loadJson(SETTINGS_KEY, {})) };
+    state.authError = '';
+  } catch (error) {
+    if (error.message === '未登录') {
+      state.user = null;
+      state.authError = '';
+      return;
+    }
+    state.authError = '无法连接到账号服务，请确认已通过 npm run dev 启动后端。';
+  }
+}
+
+function loadUserStorage() {
+  const scoped = loadJson(`${STORAGE_KEY}.${state.user?.id || 'legacy'}`, null);
+  const legacy = state.user?.id === 1 ? loadJson(STORAGE_KEY, null) : null;
+  applyStorageState(mergeStorageState(scoped || {}, legacy || {}));
 }
 
 function snapshotHasData(snapshot) {
@@ -90,7 +132,7 @@ function applyStorageState(nextState) {
       store[key] = nextState?.[key] && typeof nextState[key] === 'object' ? nextState[key] : {};
     }
   }
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+  localStorage.setItem(`${STORAGE_KEY}.${state.user?.id || 'legacy'}`, JSON.stringify(store));
 }
 
 function scheduleStorageSync() {
@@ -106,6 +148,7 @@ async function syncStorage() {
   try {
     const response = await fetch('/api/state', {
       method: 'PUT',
+      credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(store),
     });
@@ -121,12 +164,16 @@ async function syncStorage() {
 
 async function initPersistence() {
   try {
+    loadUserStorage();
     const response = await fetch('/api/state', { cache: 'no-store' });
     if (!response.ok) throw new Error('SQLite 状态读取失败');
     const payload = await response.json();
     const remoteState = payload.state || {};
     const localState = JSON.parse(JSON.stringify(store));
-    if (snapshotHasData(remoteState)) applyStorageState(mergeStorageState(localState, remoteState));
+    if (snapshotHasData(remoteState)) {
+      applyStorageState(mergeStorageState(localState, remoteState));
+      scheduleStorageSync();
+    }
     else if (snapshotHasData(localState)) {
       state.storage = 'sqlite';
       scheduleStorageSync();
@@ -139,7 +186,112 @@ async function initPersistence() {
 }
 
 function persistSettings() {
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  localStorage.setItem(`${SETTINGS_KEY}.${state.user?.id || 'legacy'}`, JSON.stringify(settings));
+}
+
+function authCardLegacy() {
+  const register = state.authMode === 'register';
+  return `<main class="auth-page"><section class="auth-paper"><div class="auth-mark">墨</div><p class="eyebrow">墨卷 / 账号入口</p><h1>${register ? '一起开始，<br><span>留下你的笔迹。</span>' : '欢迎回来，<br><span>继续今天的练习。</span>'}</h1><p class="auth-intro">${register ? '创建账号后，刷题进度、收藏、错题和答案草稿会跟着账号走。' : '登录后即可在不同设备继续刷题，学习记录按账号独立保存。'}</p><form data-form="auth" class="auth-form"><label>用户名<input name="username" autocomplete="username" required minlength="2" maxlength="32" placeholder="例如：xiaoming" /></label>${register ? '<label>显示名称<input name="displayName" maxlength="40" placeholder="你的称呼" /></label>' : ''}<label>密码<input name="password" type="password" autocomplete="current-password" required minlength="8" placeholder="至少 8 位" /></label>${register ? '<label>确认密码<input name="confirmPassword" type="password" autocomplete="new-password" required minlength="8" placeholder="再输入一次" /></label>' : ''}<button class="submit-button" type="submit">${icon(register ? 'user-plus' : 'log-in')} ${register ? '创建账号' : '登录墨卷'}</button></form>${state.authError ? `<p class="auth-error">${icon('triangle-alert')}${escapeHtml(state.authError)}</p>` : ''}<button class="auth-switch" data-action="toggle-auth">${register ? '已有账号？返回登录' : state.config.registration ? '还没有账号？注册一个' : '注册功能未开放'}</button><div class="auth-note"><span>当前模式</span><strong>${state.config.registration ? '开放注册' : '仅管理员创建账号'}</strong><small>账号数据存储在服务端 SQLite，每个账号相互隔离。</small></div></section></main>`;
+}
+
+async function submitAuthLegacy(form) {
+  const data = new FormData(form);
+  const register = state.authMode === 'register';
+  const password = String(data.get('password') || '');
+  if (register && password !== String(data.get('confirmPassword') || '')) {
+    state.authError = '两次输入的密码不一致';
+    render();
+    return;
+  }
+  state.authError = '';
+  try {
+    const payload = await apiJson(register ? '/api/auth/register' : '/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: data.get('username'), password, displayName: data.get('displayName') }),
+    });
+    state.user = payload.user;
+    settings = { ...DEFAULT_SETTINGS, ...loadJson(`${SETTINGS_KEY}.${state.user.id}`, loadJson(SETTINGS_KEY, {})) };
+    loadUserStorage();
+    await loadManifest();
+    await initPersistence();
+    render();
+  } catch (error) {
+    state.authError = error.message || '账号操作失败';
+    render();
+  }
+}
+
+async function logoutLegacy() {
+  try { await apiJson('/api/auth/logout', { method: 'POST' }); } catch { /* Session may already be expired. */ }
+  state.user = null;
+  state.storage = 'browser';
+  state.question = null;
+  state.aiResult = null;
+  render();
+}
+
+async function loadAdminDataLegacy() {
+  if (state.user?.role !== 'admin') return;
+  try {
+    const [users, stats] = await Promise.all([apiJson('/api/admin/users'), apiJson('/api/admin/stats')]);
+    state.adminUsers = users.users || [];
+    state.adminStats = stats.stats || null;
+  } catch (error) {
+    showToast(error.message || '管理员数据加载失败');
+  }
+}
+
+function authCard() {
+  const register = state.authMode === 'register';
+  return `<main class="auth-page"><section class="auth-paper"><div class="auth-mark">墨</div><p class="eyebrow">墨卷 / 账号入口</p><h1>${register ? '一起开始，<br><span>留下你的笔迹。</span>' : '欢迎回来，<br><span>继续今天的练习。</span>'}</h1><p class="auth-intro">${register ? '创建账号后，刷题进度、收藏、错题和答案草稿会跟着账号走。' : '登录后即可在不同设备继续刷题，学习记录按账号独立保存。'}</p><form data-form="auth" class="auth-form"><label>用户名<input name="username" autocomplete="username" required minlength="2" maxlength="32" placeholder="例如：xiaoming" /></label>${register ? '<label>显示名称<input name="displayName" maxlength="40" placeholder="你的称呼" /></label>' : ''}<label>密码<input name="password" type="password" autocomplete="current-password" required minlength="8" placeholder="至少 8 位" /></label>${register ? '<label>确认密码<input name="confirmPassword" type="password" autocomplete="new-password" required minlength="8" placeholder="再输入一次" /></label>' : ''}<button class="submit-button" type="submit">${icon(register ? 'user-plus' : 'log-in')} ${register ? '创建账号' : '登录墨卷'}</button></form>${state.authError ? `<p class="auth-error">${icon('triangle-alert')}${escapeHtml(state.authError)}</p>` : ''}<button class="auth-switch" data-action="toggle-auth">${register ? '已有账号？返回登录' : state.config.registration ? '还没有账号？注册一个' : '注册功能未开放'}</button><div class="auth-note"><span>当前模式</span><strong>${state.config.registration ? '开放注册' : '仅管理员创建账号'}</strong><small>账号数据存储在服务端 SQLite，每个账号相互隔离。</small></div></section></main>`;
+}
+
+async function submitAuth(form) {
+  const data = new FormData(form);
+  const register = state.authMode === 'register';
+  const password = String(data.get('password') || '');
+  if (register && password !== String(data.get('confirmPassword') || '')) {
+    state.authError = '两次输入的密码不一致';
+    render();
+    return;
+  }
+  state.authError = '';
+  try {
+    const payload = await apiJson(register ? '/api/auth/register' : '/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: data.get('username'), password, displayName: data.get('displayName') }),
+    });
+    state.user = payload.user;
+    settings = { ...DEFAULT_SETTINGS, ...loadJson(`${SETTINGS_KEY}.${state.user.id}`, loadJson(SETTINGS_KEY, {})) };
+    loadUserStorage();
+    await initPersistence();
+    render();
+  } catch (error) {
+    state.authError = error.message || '账号操作失败';
+    render();
+  }
+}
+
+async function logout() {
+  try { await apiJson('/api/auth/logout', { method: 'POST' }); } catch { /* The session may already be expired. */ }
+  state.user = null;
+  state.storage = 'browser';
+  state.question = null;
+  state.aiResult = null;
+  render();
+}
+
+async function loadAdminData() {
+  if (state.user?.role !== 'admin') return;
+  try {
+    const [users, stats] = await Promise.all([apiJson('/api/admin/users'), apiJson('/api/admin/stats')]);
+    state.adminUsers = users.users || [];
+    state.adminStats = stats.stats || null;
+  } catch (error) {
+    showToast(error.message || '管理员数据加载失败');
+  }
 }
 
 function escapeHtml(value = '') {
@@ -503,8 +655,8 @@ async function askModel(kind = 'score') {
     showToast('请先在设置中打开大模型辅助');
     return;
   }
-  if (!settings.apiKey.trim()) {
-    showToast('请先在设置中填写 OpenAI 兼容 API Key');
+  if (!settings.apiKey.trim() && !state.config.ai?.configured) {
+    showToast('请先在设置中填写 OpenAI 兼容 API Key，或等待管理员配置统一模型');
     state.view = 'settings';
     location.hash = 'settings';
     render();
@@ -514,12 +666,13 @@ async function askModel(kind = 'score') {
   state.aiResult = null;
   render();
   try {
-    const endpoint = settings.endpoint.replace(/\/$/, '');
-    const response = await fetch(`${endpoint}/chat/completions`, {
+    const endpoint = settings.apiKey.trim() ? `${settings.endpoint.replace(/\/$/, '')}/chat/completions` : '/api/ai/chat/completions';
+    const response = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${settings.apiKey.trim()}` },
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', ...(settings.apiKey.trim() ? { Authorization: `Bearer ${settings.apiKey.trim()}` } : {}) },
       body: JSON.stringify({
-        model: settings.model.trim() || DEFAULT_SETTINGS.model,
+        model: settings.apiKey.trim() ? settings.model.trim() || DEFAULT_SETTINGS.model : state.config.ai.model,
         temperature: 0.2,
         response_format: { type: 'json_object' },
         messages: [
@@ -566,10 +719,10 @@ function renderShell(content) {
           <button class="subject-tab ${state.filters.subject === '行测' ? 'selected' : ''}" data-action="subject" data-subject="行测"><span class="ink-dot yellow"></span>行测题库<em>${subjectCount('行测').toLocaleString()}</em></button>
           <button class="subject-tab ${state.filters.subject === '公基' ? 'selected' : ''}" data-action="subject" data-subject="公基"><span class="ink-dot green"></span>公基题库<em>${subjectCount('公基').toLocaleString()}</em></button>
         </div>
-        <div class="sidebar-bottom"><div class="progress-stamp"><span>已完成</span><strong>${progressPercent()}%</strong><div class="progress-line"><i style="width:${progressPercent()}%"></i></div></div>${navItem('settings', '设置与模型', 'sliders-horizontal')}</div>
+        <div class="sidebar-bottom"><div class="progress-stamp"><span>已完成</span><strong>${progressPercent()}%</strong><div class="progress-line"><i style="width:${progressPercent()}%"></i></div></div>${navItem('settings', '设置与模型', 'sliders-horizontal')}${state.user?.role === 'admin' ? navItem('admin', '管理员', 'shield-check') : ''}</div>
       </aside>
       <main class="main-area">
-        <header class="topbar"><div class="mobile-brand"><span class="brand-mark">墨</span><strong>墨卷</strong></div><div class="topbar-note"><span class="tiny-pencil">✎</span> 今天也写一题，进步就有形状</div><div class="top-actions"><button class="icon-button" data-action="navigate" data-view="settings" title="设置">${icon('settings-2')}</button><button class="avatar-button" data-action="navigate" data-view="desk" title="回到书桌">林</button></div></header>
+        <header class="topbar"><div class="mobile-brand"><span class="brand-mark">墨</span><strong>墨卷</strong></div><div class="topbar-note"><span class="tiny-pencil">✎</span> 今天也写一题，进步就有形状</div><div class="top-actions"><span class="user-chip">${escapeHtml(state.user?.displayName || state.user?.username || '')}</span><button class="icon-button" data-action="navigate" data-view="settings" title="设置">${icon('settings-2')}</button><button class="avatar-button" data-action="logout" title="退出登录">${escapeHtml((state.user?.displayName || state.user?.username || '墨').slice(0, 1))}</button></div></header>
         <div class="page-content">${content}</div>
       </main>
     </div>
@@ -670,22 +823,57 @@ function renderLibrary(view) {
 }
 
 function renderSettings() {
-  return `<section class="settings-page reveal"><div class="settings-heading"><div><p class="eyebrow">工具箱 / 本地保存</p><h1>让工具，<br>听你的。</h1><p>设置只保存在当前浏览器。API Key 不会写入题库文件。</p></div><div class="settings-doodle">${icon('key-round')}<span>可选<br>增强</span></div></div><div class="settings-grid"><form class="settings-form" data-form="settings"><div class="form-section"><div class="form-section-heading"><span>01</span><div><h3>大模型连接</h3><p>支持 OpenAI 格式的 /chat/completions 接口。</p></div></div><label>接口地址<input name="endpoint" value="${escapeHtml(settings.endpoint)}" placeholder="https://api.openai.com/v1" /></label><label>模型名称<input name="model" value="${escapeHtml(settings.model)}" placeholder="gpt-4o-mini" /></label><label>API Key<input name="apiKey" type="password" value="${escapeHtml(settings.apiKey)}" placeholder="sk-..." autocomplete="off" /></label><label class="switch-line"><span><strong>启用大模型辅助</strong><small>主观题评分、选择题解析都会出现入口</small></span><input name="aiEnabled" type="checkbox" ${settings.aiEnabled ? 'checked' : ''}/><i class="toggle-ui"></i></label><button class="submit-button save-settings" type="submit">${icon('save')} 保存设置</button></div><div class="form-section"><div class="form-section-heading"><span>02</span><div><h3>练习偏好</h3><p>这些偏好只影响当前设备上的工作台。</p></div></div><label class="switch-line"><span><strong>交卷后自动显示自评</strong><small>基于参考答案的离线要点匹配</small></span><input type="checkbox" checked disabled/><i class="toggle-ui"></i></label><label class="switch-line"><span><strong>保留答案草稿</strong><small>切换题目后保留已写内容</small></span><input type="checkbox" checked disabled/><i class="toggle-ui"></i></label></div></form><aside class="settings-notes"><div class="note-paper"><span class="tape"></span><h3>使用小贴士</h3><p>1. 先保存设置，再回到题目页。</p><p>2. 接口地址填到版本根路径，例如 https://api.openai.com/v1。</p><p>3. 如果服务商不支持 JSON 模式，模型仍可能返回文本，请换用支持 OpenAI 格式的模型。</p><p>4. 没有 Key 也能使用离线自评和完整题库。</p></div><div class="data-note"><span>数据状态</span><strong>${state.manifest?.total.toLocaleString()} 道题已就绪</strong><small>由 Markdown 题库构建 · ${state.manifest?.generatedAt ? new Date(state.manifest.generatedAt).toLocaleDateString('zh-CN') : '本地'}</small></div></aside></div></section>`;
+  const unified = state.config.ai?.configured;
+  return `<section class="settings-page reveal"><div class="settings-heading"><div><p class="eyebrow">工具箱 / ${state.storage === 'sqlite' ? '账号云端保存' : '浏览器保存'}</p><h1>让工具，<br>听你的。</h1><p>当前账号：${escapeHtml(state.user?.displayName || state.user?.username || '')}。学习记录保存到服务端 SQLite；模型 Key 可由个人配置，也可使用管理员统一配置。</p></div><div class="settings-doodle">${icon('key-round')}<span>${unified ? '统一<br>已接入' : '可选<br>增强'}</span></div></div><div class="settings-grid"><form class="settings-form" data-form="settings"><div class="form-section"><div class="form-section-heading"><span>01</span><div><h3>大模型连接</h3><p>支持 OpenAI 格式的 /chat/completions 接口。${unified ? '管理员已配置统一模型，填写个人 Key 可覆盖。' : ''}</p></div></div><label>接口地址<input name="endpoint" value="${escapeHtml(settings.endpoint)}" placeholder="https://api.openai.com/v1" /></label><label>模型名称<input name="model" value="${escapeHtml(settings.model)}" placeholder="gpt-4o-mini" /></label><label>个人 API Key<input name="apiKey" type="password" value="${escapeHtml(settings.apiKey)}" placeholder="留空则使用管理员统一配置" autocomplete="off" /></label><label class="switch-line"><span><strong>启用大模型辅助</strong><small>主观题评分、选择题解析都会出现入口</small></span><input name="aiEnabled" type="checkbox" ${settings.aiEnabled ? 'checked' : ''}/><i class="toggle-ui"></i></label><button class="submit-button save-settings" type="submit">${icon('save')} 保存设置</button></div><div class="form-section"><div class="form-section-heading"><span>02</span><div><h3>账号与数据</h3><p>这个账号的记录不会与其他用户混在一起。</p></div></div><button class="outline-button" type="button" data-action="logout">${icon('log-out')} 退出当前账号</button></div></form><aside class="settings-notes"><div class="note-paper"><span class="tape"></span><h3>使用小贴士</h3><p>1. 个人 Key 只保存在当前浏览器，不会写入 SQLite。</p><p>2. 留空个人 Key 时，系统会通过服务端使用管理员统一模型。</p><p>3. 没有任何 Key 也能使用离线自评和完整题库。</p><p>4. 管理员在生产环境应通过环境变量配置统一 Key。</p></div><div class="data-note"><span>数据状态</span><strong>${state.manifest?.total.toLocaleString()} 道题已就绪</strong><small>由 Markdown 题库构建 · ${state.manifest?.generatedAt ? new Date(state.manifest.generatedAt).toLocaleDateString('zh-CN') : '本地'}</small></div></aside></div></section>`;
+}
+
+function renderAdmin() {
+  const stats = state.adminStats || { users: 0, activeUsers: 0, completed: 0, sessions: 0 };
+  return `<section class="admin-page reveal"><div class="library-heading"><div><p class="eyebrow">系统管理 / 账号与服务</p><h1>管理员台账</h1><p>统一管理账号状态，学习记录和题库正文不会在此页暴露。</p></div><button class="outline-button" data-action="load-admin">${icon('refresh-cw')} 刷新数据</button></div><div class="admin-stats"><div><span>账号总数</span><strong>${stats.users}</strong></div><div><span>启用账号</span><strong>${stats.activeUsers}</strong></div><div><span>完成记录</span><strong>${stats.completed}</strong></div><div><span>刷题会话</span><strong>${stats.sessions}</strong></div></div><div class="admin-grid"><form class="settings-form" data-form="new-user"><div class="form-section"><div class="form-section-heading"><span>01</span><div><h3>创建账号</h3><p>为团队成员创建普通用户或管理员。</p></div></div><label>用户名<input name="username" required minlength="2" maxlength="32" /></label><label>显示名称<input name="displayName" maxlength="40" /></label><label>初始密码<input name="password" type="password" required minlength="8" /></label><label>角色<select name="role"><option value="user">普通用户</option><option value="admin">管理员</option></select></label><button class="submit-button" type="submit">${icon('user-plus')} 创建账号</button></div></form><div class="admin-users"><div class="section-heading"><div><p class="eyebrow">02 / 账号列表</p><h2>成员</h2></div></div>${state.adminUsers.map((user) => `<div class="admin-user-row"><div><strong>${escapeHtml(user.displayName)}</strong><span>${escapeHtml(user.username)} · ${user.role === 'admin' ? '管理员' : '普通用户'}</span></div><div class="admin-user-actions"><span class="status-dot ${user.active ? 'on' : ''}">${user.active ? '启用' : '停用'}</span>${user.id === state.user.id ? '<small>当前账号</small>' : `<button class="text-button" data-action="toggle-user" data-user-id="${user.id}" data-active="${user.active}">${user.active ? '停用' : '启用'}</button><button class="text-button" data-action="reset-user" data-user-id="${user.id}">重置密码</button>`}</div></div>`).join('')}</div></div></section>`;
 }
 
 function render() {
+  if (!state.user) {
+    app.innerHTML = authCard();
+    hydrateIcons();
+    return;
+  }
   if (!state.manifest) return;
   let content;
   if (state.view === 'practice') content = renderPractice();
   else if (state.view === 'mistakes' || state.view === 'favorites') content = renderLibrary(state.view);
   else if (state.view === 'settings') content = renderSettings();
+  else if (state.view === 'admin' && state.user.role === 'admin') content = renderAdmin();
   else content = renderDesk();
   renderShell(content);
 }
 
 function handleAction(target) {
   const action = target.dataset.action;
-  if (action === 'navigate') {
+  if (action === 'toggle-auth') {
+    if (!state.config.registration && state.authMode === 'login') return;
+    state.authMode = state.authMode === 'login' ? 'register' : 'login';
+    state.authError = '';
+    render();
+  } else if (action === 'logout') {
+    logout();
+  } else if (action === 'load-admin') {
+    loadAdminData().then(render);
+  } else if (action === 'toggle-user') {
+    apiJson(`/api/admin/users/${target.dataset.userId}/active`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ active: target.dataset.active !== 'true' }),
+    }).then(() => loadAdminData()).then(render).catch((error) => showToast(error.message));
+  } else if (action === 'reset-user') {
+    const password = window.prompt('请输入新的初始密码（至少 8 位）');
+    if (!password) return;
+    apiJson(`/api/admin/users/${target.dataset.userId}/password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    }).then(() => showToast('密码已重置')).catch((error) => showToast(error.message));
+  } else if (action === 'navigate') {
     state.view = target.dataset.view;
     location.hash = state.view;
     if (state.view === 'practice') {
@@ -693,6 +881,7 @@ function handleAction(target) {
       if (state.filters.subject !== '全部') loadSummaries(state.filters.subject);
     }
     if (state.view === 'mistakes' || state.view === 'favorites') loadSummaries('全部');
+    if (state.view === 'admin') loadAdminData().then(render);
     render();
   } else if (action === 'subject') {
     state.filters.subject = state.filters.subject === target.dataset.subject ? '全部' : target.dataset.subject;
@@ -774,9 +963,24 @@ app.addEventListener('change', (event) => {
 });
 
 app.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const authForm = event.target.closest('[data-form="auth"]');
+  if (authForm) {
+    submitAuth(authForm);
+    return;
+  }
+  const userForm = event.target.closest('[data-form="new-user"]');
+  if (userForm) {
+    const data = new FormData(userForm);
+    apiJson('/api/admin/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: data.get('username'), password: data.get('password'), displayName: data.get('displayName'), role: data.get('role') }),
+    }).then(() => { userForm.reset(); return loadAdminData(); }).then(render).catch((error) => showToast(error.message));
+    return;
+  }
   const form = event.target.closest('[data-form="settings"]');
   if (!form) return;
-  event.preventDefault();
   const data = new FormData(form);
   settings = {
     endpoint: String(data.get('endpoint') || DEFAULT_SETTINGS.endpoint).trim(),
@@ -795,8 +999,14 @@ window.addEventListener('hashchange', () => {
 });
 
 async function bootstrap() {
+  await initAuth();
+  if (!state.user) {
+    render();
+    return;
+  }
   await loadManifest();
   await initPersistence();
+  if (state.view === 'admin') await loadAdminData();
   render();
 }
 

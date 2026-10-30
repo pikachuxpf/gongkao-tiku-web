@@ -5,4 +5,5 @@ public/data/
 .playwright-mcp/
 artifacts/
 .source/
-storage/
+storage/*.sqlite
+storage/*.sqlite-*
