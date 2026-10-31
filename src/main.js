@@ -907,7 +907,7 @@ function renderSettings() {
   const unified = state.config.ai?.configured;
   const admin = state.user?.role === 'admin';
   const aiSection = admin
-    ? `<div class="form-section"><div class="form-section-heading"><span>01</span><div><h3>全站共享大模型</h3><p>所有账号的解析和点评共用此配置，密钥仅保存在服务器。</p></div></div><label>兼容接口地址<input name="sharedEndpoint" value="${escapeHtml(state.sharedAi.endpoint || DEFAULT_SETTINGS.endpoint)}" placeholder="https://api.openai.com/v1" /></label><label>模型名称<input name="sharedModel" value="${escapeHtml(state.sharedAi.model || DEFAULT_SETTINGS.model)}" placeholder="gpt-4o-mini" /></label><label>API Key<input name="sharedApiKey" type="password" value="" placeholder="${state.sharedAi.configured ? '已配置，留空保持不变' : '粘贴服务商 API Key'}" autocomplete="new-password" /></label><p class="ai-config-status">${state.sharedAi.configured ? `全站已接入 · ${escapeHtml(state.sharedAi.model)}` : '尚未配置共享模型'}</p><button class="submit-button save-settings" type="submit">${icon('save')} 保存全站模型</button>${state.sharedAi.configured ? `<button class="text-button" type="button" data-action="clear-shared-ai">清除服务器密钥</button>` : ''}</div>`
+    ? `<div class="form-section"><div class="form-section-heading"><span>01</span><div><h3>全站共享大模型</h3><p>所有账号的解析和点评共用此配置，密钥仅保存在服务器。</p></div></div><label>兼容接口地址<input name="sharedEndpoint" value="${escapeHtml(state.sharedAi.endpoint || DEFAULT_SETTINGS.endpoint)}" placeholder="https://api.openai.com/v1" /></label><label>模型名称<input name="sharedModel" value="${escapeHtml(state.sharedAi.model || DEFAULT_SETTINGS.model)}" placeholder="gpt-4o-mini" /></label><label>API Key<input name="sharedApiKey" type="password" value="" placeholder="${state.sharedAi.configured ? '已配置，留空保持不变' : '粘贴服务商 API Key'}" autocomplete="new-password" /></label><p class="ai-config-status">${state.sharedAi.configured ? `全站已接入 · ${escapeHtml(state.sharedAi.model)}` : settings.apiKey ? '检测到本浏览器旧版设置中的模型密钥' : '尚未配置共享模型'}</p><button class="submit-button save-settings" type="submit">${icon('save')} 保存全站模型</button>${!state.sharedAi.configured && settings.apiKey ? `<button class="outline-button" type="button" data-action="migrate-local-ai">${icon('upload')} 迁移本浏览器已保存配置</button>` : ''}${state.sharedAi.configured ? `<button class="text-button" type="button" data-action="clear-shared-ai">清除服务器密钥</button>` : ''}</div>`
     : `<div class="form-section"><div class="form-section-heading"><span>01</span><div><h3>全站共享大模型</h3><p>${unified ? `已接入 ${escapeHtml(state.config.ai.model)}，可直接用于解析和点评。` : '管理员尚未完成共享模型配置。'}</p></div></div><p class="ai-config-status">${unified ? '服务可用配置已保存' : '当前不可用，请联系管理员配置'}</p></div>`;
   const sectionNumber = admin ? '02' : '02';
   return `<section class="settings-page reveal"><div class="settings-heading"><div><p class="eyebrow">工具箱 / ${state.storage === 'sqlite' ? '账号云端保存' : '浏览器保存'}</p><h1>让工具，<br>听你的。</h1><p>当前账号：${escapeHtml(state.user?.displayName || state.user?.username || '')}。学习记录保存到服务端 SQLite；大模型由管理员为全站统一配置。</p></div><div class="settings-doodle">${icon('key-round')}<span>${unified ? '统一<br>已接入' : '等待<br>配置'}</span></div></div><div class="settings-grid"><form class="settings-form" data-form="settings">${aiSection}<div class="form-section"><div class="form-section-heading"><span>${sectionNumber}</span><div><h3>练习偏好</h3><p>大模型评分和选择题解析使用全站共享服务。</p></div></div><label class="switch-line"><span><strong>启用大模型辅助</strong><small>主观题点评、选择题解析都会出现入口</small></span><input name="aiEnabled" type="checkbox" ${settings.aiEnabled ? 'checked' : ''}/><i class="toggle-ui"></i></label><button class="outline-button save-settings" type="submit">${icon('save')} 保存练习偏好</button></div><div class="form-section"><div class="form-section-heading"><span>03</span><div><h3>账号与数据</h3><p>这个账号的记录不会与其他用户混在一起。</p></div></div><button class="outline-button" type="button" data-action="logout">${icon('log-out')} 退出当前账号</button></div></form><aside class="settings-notes"><div class="note-paper"><span class="tape"></span><h3>模型状态</h3><p>全站账号统一使用管理员配置的兼容接口、模型和 API Key。</p><p>密钥不会回传至浏览器，留空保存可保留现有密钥。</p><p>API Key 更新只影响后续请求，不改动练习记录。</p></div><div class="data-note"><span>数据状态</span><strong>${state.manifest?.total.toLocaleString()} 道题已就绪</strong><small>由 Markdown 题库构建 · ${state.manifest?.generatedAt ? new Date(state.manifest.generatedAt).toLocaleDateString('zh-CN') : '本地'}</small></div></aside></div></section>`;
@@ -954,6 +954,19 @@ function handleAction(target) {
       state.sharedAi = payload.ai;
       state.config.ai = { configured: false, model: payload.ai.model };
       showToast('服务器模型密钥已清除');
+      render();
+    }).catch((error) => showToast(error.message));
+  } else if (action === 'migrate-local-ai') {
+    apiJson('/api/admin/ai-config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ endpoint: settings.endpoint, model: settings.model, apiKey: settings.apiKey }),
+    }).then((payload) => {
+      state.sharedAi = payload.ai;
+      state.config.ai = { configured: payload.ai.configured, model: payload.ai.model };
+      settings.apiKey = '';
+      persistSettings();
+      showToast('已迁移到全站共享配置，并清除本机旧密钥');
       render();
     }).catch((error) => showToast(error.message));
   } else if (action === 'toggle-user') {
