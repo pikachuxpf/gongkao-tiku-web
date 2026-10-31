@@ -150,7 +150,13 @@ h3 { margin-bottom: 0; font-size: 18px; }
 .outline-button svg, .secondary-button svg { width: 15px; height: 15px; }
 .filter-bar { margin-bottom: 18px; padding: 10px 0; display: flex; gap: 8px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .filter-bar select, .search-field { height: 35px; border: 1px solid var(--line); color: var(--ink-soft); background: var(--paper-light); font-size: 11px; }
-.filter-bar select { min-width: 105px; padding: 0 9px; }
+.filter-bar select { min-width: 105px; padding: 0 9px; }.unseen-filter { min-height: 35px; padding: 0 10px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); color: var(--ink-soft); background: var(--paper-light); font-size: 11px; white-space: nowrap; cursor: pointer; }
+.unseen-filter input { width: 14px; height: 14px; margin: 0; accent-color: var(--red); }
+.practice-queue-tools { margin: -7px 0 20px; display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--ink-soft); font-size: 11px; }
+.empty-practice { min-height: 260px; padding: 45px 20px; display: grid; align-content: center; justify-items: center; border: 1px dashed var(--line-dark); color: var(--ink-soft); text-align: center; }
+.empty-practice .empty-mark { width: 48px; height: 48px; margin-bottom: 16px; display: grid; place-items: center; border: 1px solid var(--line-dark); color: var(--red); font-family: var(--hand); font-size: 25px; transform: rotate(-5deg); }
+.empty-practice h3 { margin-bottom: 8px; color: var(--ink); font-size: 18px; }
+.empty-practice p { margin: 0; font-size: 12px; line-height: 1.7; }
 .search-field { min-width: 190px; flex: 1; display: flex; align-items: center; padding: 0 10px; gap: 8px; }
 .search-field svg { width: 14px; height: 14px; }
 .search-field input { width: 100%; border: 0; outline: 0; color: var(--ink); background: transparent; font-size: 11px; }
@@ -398,6 +404,8 @@ code { padding: 2px 5px; background: var(--paper-deep); font-family: monospace; 
   .filter-bar { flex-wrap: wrap; }
   .search-field { min-width: calc(100% - 0px); order: -1; }
   .filter-bar select { flex: 1; min-width: 0; }
+  .unseen-filter { flex: 1 1 100%; }
+  .practice-queue-tools { align-items: flex-start; }
   .question-paper { padding: 20px 16px; }
   .question-title-row { padding: 23px 0; gap: 12px; }
   .question-number { width: 39px; height: 39px; flex-basis: 39px; font-size: 20px; }

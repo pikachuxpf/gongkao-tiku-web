@@ -1,9 +1,11 @@
 import { createIcons, icons } from 'lucide';
 import { sortQuestions } from './question-order.mjs';
+import { buildPracticeQueue } from './practice-queue.mjs';
 import './styles.css';
 
 const STORAGE_KEY = 'mojuan.practice.v1';
 const SETTINGS_KEY = 'mojuan.settings.v1';
+const PRACTICE_KEY = 'mojuan.practice-options.v1';
 const DEFAULT_SETTINGS = {
   endpoint: 'https://api.openai.com/v1',
   model: 'gpt-4o-mini',
@@ -23,7 +25,9 @@ const state = {
   summaryPromises: new Map(),
   view: location.hash.replace('#', '') || 'desk',
   filters: { subject: '全部', category: '全部', mode: '全部', search: '' },
+  practiceOptions: { order: 'fixed', unseenOnly: false },
   queue: [],
+  queueSource: [],
   queueIndex: 0,
   loadedAnswer: false,
   submitted: false,
@@ -49,6 +53,7 @@ const store = loadJson(STORAGE_KEY, {
   sessions: [],
 });
 let settings = { ...DEFAULT_SETTINGS, ...loadJson(SETTINGS_KEY, {}) };
+state.practiceOptions = { ...state.practiceOptions, ...loadJson(`${PRACTICE_KEY}.${state.user?.id || 'legacy'}`, loadJson(PRACTICE_KEY, {})) };
 let storageSyncTimer = null;
 let storageSyncInFlight = false;
 let storageSyncPending = false;
@@ -85,6 +90,7 @@ async function initAuth() {
     }
     state.user = me.user;
     settings = { ...DEFAULT_SETTINGS, ...loadJson(`${SETTINGS_KEY}.${state.user.id}`, loadJson(SETTINGS_KEY, {})) };
+    state.practiceOptions = loadPracticeOptions();
     state.authError = '';
   } catch (error) {
     if (error.message === '未登录') {
@@ -100,6 +106,14 @@ function loadUserStorage() {
   const scoped = loadJson(`${STORAGE_KEY}.${state.user?.id || 'legacy'}`, null);
   const legacy = state.user?.id === 1 ? loadJson(STORAGE_KEY, null) : null;
   applyStorageState(mergeStorageState(scoped || {}, legacy || {}));
+}
+
+function loadPracticeOptions() {
+  const saved = loadJson(`${PRACTICE_KEY}.${state.user?.id || 'legacy'}`, loadJson(PRACTICE_KEY, {}));
+  return {
+    order: saved.order === 'random' ? 'random' : 'fixed',
+    unseenOnly: Boolean(saved.unseenOnly),
+  };
 }
 
 function snapshotHasData(snapshot) {
@@ -215,6 +229,7 @@ async function submitAuthLegacy(form) {
     });
     state.user = payload.user;
     settings = { ...DEFAULT_SETTINGS, ...loadJson(`${SETTINGS_KEY}.${state.user.id}`, loadJson(SETTINGS_KEY, {})) };
+    state.practiceOptions = loadPracticeOptions();
     loadUserStorage();
     await loadManifest();
     await initPersistence();
@@ -268,6 +283,7 @@ async function submitAuth(form) {
     });
     state.user = payload.user;
     settings = { ...DEFAULT_SETTINGS, ...loadJson(`${SETTINGS_KEY}.${state.user.id}`, loadJson(SETTINGS_KEY, {})) };
+    state.practiceOptions = loadPracticeOptions();
     loadUserStorage();
     await loadManifest();
     await initPersistence();
@@ -457,8 +473,8 @@ async function loadSummaries(subject = '全部') {
   }
 }
 
-function filteredQuestions() {
-  const search = state.filters.search.trim().toLowerCase();
+function filteredQuestions({ ignoreSearch = false } = {}) {
+  const search = ignoreSearch ? '' : state.filters.search.trim().toLowerCase();
   return sortQuestions(loadedQuestions().filter((item) => {
     const categoryMatch = state.filters.category === '全部' || item.category === state.filters.category;
     const subjectMatch = state.filters.subject === '全部' || item.subject === state.filters.subject;
@@ -498,9 +514,11 @@ async function applyPracticeFilters({ subjectChanged = false } = {}) {
 
   await loadSummaries(state.filters.subject);
   if (requestId !== state.questionRequest) return;
-  state.queue = filteredQuestions();
+  state.queueSource = makePracticeQueue(filteredQuestions());
+  state.queue = [...state.queueSource];
   state.queueIndex = 0;
   if (state.queue.length) {
+    state.questionLoading = false;
     await loadQuestion(state.queue[0].id);
   } else {
     state.questionLoading = false;
@@ -581,7 +599,7 @@ function selectQuestion(id) {
 
 function selectFromQueue() {
   if (!state.queue.length) {
-    showToast('没有符合当前筛选条件的题目');
+    showToast(state.practiceOptions.unseenOnly ? '当前筛选下没有未做过的题目' : '没有符合当前筛选条件的题目');
     return;
   }
   state.queueIndex = Math.min(state.queueIndex, state.queue.length - 1);
@@ -589,8 +607,37 @@ function selectFromQueue() {
 }
 
 function prepareQueue(items = filteredQuestions()) {
-  state.queue = items;
-  state.queueIndex = Math.max(0, items.findIndex((item) => item.id === state.question?.id));
+  state.queueSource = makePracticeQueue(items);
+  state.queue = [...state.queueSource];
+  state.queueIndex = Math.max(0, state.queue.findIndex((item) => item.id === state.question?.id));
+}
+
+function makePracticeQueue(items = filteredQuestions()) {
+  return buildPracticeQueue(items, { ...state.practiceOptions, completed: store.completed });
+}
+
+function startPracticeQueue(items = filteredQuestions()) {
+  if (!items.length) {
+    state.queueSource = [];
+    state.queue = [];
+    state.queueIndex = 0;
+    resetQuestionState();
+    render();
+    return;
+  }
+  state.queueSource = makePracticeQueue(items);
+  state.queue = [...state.queueSource];
+  state.queueIndex = 0;
+  resetQuestionState();
+  if (!state.queue.length) {
+    render();
+    return;
+  }
+  selectFromQueue();
+}
+
+function savePracticeOptions() {
+  localStorage.setItem(`${PRACTICE_KEY}.${state.user?.id || 'legacy'}`, JSON.stringify(state.practiceOptions));
 }
 
 function toggleFavorite(id) {
@@ -824,7 +871,7 @@ function questionRow(question, index = 0) {
 function filterBar() {
   const subjectCounts = categoryCounts();
   const categoryOptions = categories();
-  return `<div class="filter-bar"><label class="search-field">${icon('search')}<input data-input="search" value="${escapeHtml(state.filters.search)}" placeholder="搜题干、题型或主题" /></label><select data-input="subject"><option>全部</option><option ${state.filters.subject === '申论' ? 'selected' : ''}>申论</option><option ${state.filters.subject === '综应' ? 'selected' : ''}>综应</option><option ${state.filters.subject === '行测' ? 'selected' : ''}>行测</option><option ${state.filters.subject === '公基' ? 'selected' : ''}>公基</option></select><select data-input="category"><option value="全部" ${state.filters.category === '全部' ? 'selected' : ''}>全部类别</option>${categoryOptions.map((category) => `<option value="${escapeHtml(category)}" ${state.filters.category === category ? 'selected' : ''}>${escapeHtml(category)} · ${(subjectCounts[category] || 0).toLocaleString()}</option>`).join('')}</select><select data-input="mode"><option value="全部" ${state.filters.mode === '全部' ? 'selected' : ''}>全部形式</option><option value="subjective" ${state.filters.mode === 'subjective' ? 'selected' : ''}>主观题</option><option value="choice" ${state.filters.mode === 'choice' ? 'selected' : ''}>选择题</option></select></div>${categoryOptions.length ? `<nav class="category-picker" aria-label="题目类别"><button class="category-chip ${state.filters.category === '全部' ? 'selected' : ''}" data-action="category" data-category="全部">全部类别 <span>${(state.filters.subject === '全部' ? state.manifest?.total : subjectCount(state.filters.subject))?.toLocaleString() || 0}</span></button>${categoryOptions.map((category) => `<button class="category-chip ${state.filters.category === category ? 'selected' : ''}" data-action="category" data-category="${escapeHtml(category)}">${escapeHtml(category)} <span>${(subjectCounts[category] || 0).toLocaleString()}</span></button>`).join('')}</nav>` : ''}`;
+  return `<div class="filter-bar"><label class="search-field">${icon('search')}<input data-input="search" value="${escapeHtml(state.filters.search)}" placeholder="搜题干、题型或主题" /></label><select data-input="subject"><option>全部</option><option ${state.filters.subject === '申论' ? 'selected' : ''}>申论</option><option ${state.filters.subject === '综应' ? 'selected' : ''}>综应</option><option ${state.filters.subject === '行测' ? 'selected' : ''}>行测</option><option ${state.filters.subject === '公基' ? 'selected' : ''}>公基</option></select><select data-input="category"><option value="全部" ${state.filters.category === '全部' ? 'selected' : ''}>全部类别</option>${categoryOptions.map((category) => `<option value="${escapeHtml(category)}" ${state.filters.category === category ? 'selected' : ''}>${escapeHtml(category)} · ${(subjectCounts[category] || 0).toLocaleString()}</option>`).join('')}</select><select data-input="mode"><option value="全部" ${state.filters.mode === '全部' ? 'selected' : ''}>全部形式</option><option value="subjective" ${state.filters.mode === 'subjective' ? 'selected' : ''}>主观题</option><option value="choice" ${state.filters.mode === 'choice' ? 'selected' : ''}>选择题</option></select><select data-input="order" aria-label="出题顺序"><option value="fixed" ${state.practiceOptions.order === 'fixed' ? 'selected' : ''}>固定顺序</option><option value="random" ${state.practiceOptions.order === 'random' ? 'selected' : ''}>随机顺序</option></select><label class="unseen-filter"><input data-input="unseen" type="checkbox" ${state.practiceOptions.unseenOnly ? 'checked' : ''}/><span>只练未做过</span></label></div>${categoryOptions.length ? `<nav class="category-picker" aria-label="题目类别"><button class="category-chip ${state.filters.category === '全部' ? 'selected' : ''}" data-action="category" data-category="全部">全部类别 <span>${(state.filters.subject === '全部' ? state.manifest?.total : subjectCount(state.filters.subject))?.toLocaleString() || 0}</span></button>${categoryOptions.map((category) => `<button class="category-chip ${state.filters.category === category ? 'selected' : ''}" data-action="category" data-category="${escapeHtml(category)}">${escapeHtml(category)} <span>${(subjectCounts[category] || 0).toLocaleString()}</span></button>`).join('')}</nav>` : ''}`;
 }
 
 function renderPractice() {
@@ -835,18 +882,20 @@ function renderPractice() {
   if (needsAllSummaries && !state.summaryLoading) {
     queueMicrotask(() => loadSummaries(state.filters.subject));
   }
-  if (!state.question && !state.questionLoading && list.length) {
-    prepareQueue(list);
-    queueMicrotask(() => loadQuestion(list[0].id));
+  if (!state.question && !state.questionLoading && list.length && !state.queue.length && !(state.practiceOptions.unseenOnly && list.every((item) => store.completed[item.id]))) {
+    startPracticeQueue(list);
   }
   const question = state.question;
   const result = question && state.submitted && question.mode === 'subjective' ? localGrade(question, state.practiceText) : null;
-  const content = state.summaryLoading && !list.length
-    ? loadingCard()
-    : state.questionLoading || !question
-      ? (list.length ? loadingCard() : selectionCard())
-      : practiceCard(question, result);
-  return `<section class="practice-layout reveal"><div class="practice-main"><div class="practice-heading"><div><p class="eyebrow">练习模式 / ${list.length.toLocaleString()} 道匹配题</p><h1>落笔，才算真正读懂。</h1></div><button class="outline-button" data-action="navigate" data-view="desk">${icon('arrow-left')} 回到书桌</button></div>${filterBar()}${content}</div><aside class="practice-aside"><div class="aside-sticky"><div class="aside-title"><span class="page-corner"></span><div><p class="eyebrow">本轮进度</p><h3>${state.queueIndex + 1} <small>/ ${state.queue.length || list.length || 0}</small></h3></div></div><div class="vertical-progress"><i style="height:${state.queue.length ? ((state.queueIndex + 1) / state.queue.length) * 100 : 0}%"></i></div><p class="aside-caption">每一道题都算数。<br>完成后会自动留下记录。</p><div class="aside-list">${state.queue.slice(Math.max(0, state.queueIndex - 1), state.queueIndex + 3).map((item, i) => `<button class="aside-question ${item.id === question?.id ? 'current' : ''}" data-action="open-question" data-id="${item.id}"><span>${String(state.queue.indexOf(item) + 1).padStart(2, '0')}</span><strong>${escapeHtml(item.title.slice(0, 24))}</strong></button>`).join('')}</div></div></aside></section>`;
+  const noUnseenQuestions = state.practiceOptions.unseenOnly && list.length > 0 && list.every((item) => store.completed[item.id]) && !state.question && !state.queue.length;
+  const content = noUnseenQuestions && !state.questionLoading
+    ? `<div class="empty-practice"><div class="empty-mark">已</div><h3>这一组题已经全部完成</h3><p>关闭“只练未做过”可以继续复习这组题。</p></div>`
+    : state.summaryLoading && !list.length
+      ? loadingCard()
+      : state.questionLoading || !question
+        ? (list.length ? loadingCard() : selectionCard())
+        : practiceCard(question, result);
+  return `<section class="practice-layout reveal"><div class="practice-main"><div class="practice-heading"><div><p class="eyebrow">练习模式 / ${state.queue.length.toLocaleString()} 道本轮题目</p><h1>落笔，才算真正读懂。</h1></div><button class="outline-button" data-action="navigate" data-view="desk">${icon('arrow-left')} 回到书桌</button></div>${filterBar()}<div class="practice-queue-tools"><span>${state.practiceOptions.order === 'random' ? '随机抽题' : '按题库顺序'}${state.practiceOptions.unseenOnly ? ' · 仅未做过' : ''}</span><button class="text-button" data-action="restart-queue">${icon('refresh-cw')} 重新开始本轮</button></div>${content}</div><aside class="practice-aside"><div class="aside-sticky"><div class="aside-title"><span class="page-corner"></span><div><p class="eyebrow">本轮进度</p><h3>${state.queue.length ? state.queueIndex + 1 : 0} <small>/ ${state.queue.length}</small></h3></div></div><div class="vertical-progress"><i style="height:${state.queue.length ? ((state.queueIndex + 1) / state.queue.length) * 100 : 0}%` + `"></i></div><p class="aside-caption">${state.practiceOptions.unseenOnly ? '本轮只包含尚未完成的题目。' : '每道题完成后会记入学习记录。'}</p><div class="aside-list">${state.queue.slice(Math.max(0, state.queueIndex - 1), state.queueIndex + 3).map((item) => `<button class="aside-question ${item.id === question?.id ? 'current' : ''}" data-action="open-question" data-id="${item.id}"><span>${String(state.queue.indexOf(item) + 1).padStart(2, '0')}</span><strong>${escapeHtml(item.title.slice(0, 24))}</strong></button>`).join('')}</div></div></aside></section>`;
 }
 
 function loadingCard() {
@@ -987,7 +1036,7 @@ function handleAction(target) {
     state.view = target.dataset.view;
     location.hash = state.view;
     if (state.view === 'practice') {
-      prepareQueue(filteredQuestions());
+      if (!state.queue.length) startPracticeQueue(filteredQuestions());
       if (state.filters.subject !== '全部') loadSummaries(state.filters.subject);
     }
     if (state.view === 'mistakes' || state.view === 'favorites') loadSummaries('全部');
@@ -1008,7 +1057,8 @@ function handleAction(target) {
     applyPracticeFilters({ subjectChanged: true });
   } else if (action === 'open-question') {
     const item = loadedQuestions().find((q) => q.id === target.dataset.id);
-    state.queue = filteredQuestions();
+    state.queueSource = makePracticeQueue(filteredQuestions());
+    state.queue = [...state.queueSource];
     state.queueIndex = Math.max(0, state.queue.findIndex((q) => q.id === target.dataset.id));
     state.view = 'practice';
     location.hash = 'practice';
@@ -1016,6 +1066,8 @@ function handleAction(target) {
   } else if (action === 'category') {
     state.filters.category = target.dataset.category || '全部';
     applyPracticeFilters();
+  } else if (action === 'restart-queue') {
+    startPracticeQueue();
   } else if (action === 'favorite') toggleFavorite(state.question?.id);
   else if (action === 'submit') submitAnswer();
   else if (action === 'clear-answer') resetAnswer();
@@ -1038,8 +1090,15 @@ app.addEventListener('input', (event) => {
     const counter = input.closest('.answer-section')?.querySelector('.answer-tools span');
     if (counter) counter.textContent = `${input.value.length} 字`;
   } else if (input.dataset.input === 'search') {
+    const selectionStart = input.selectionStart;
+    const selectionEnd = input.selectionEnd;
     state.filters.search = input.value;
-    prepareQueue(filteredQuestions());
+    if (!state.queueSource.length && state.queue.length === 0) state.queueSource = makePracticeQueue(filteredQuestions({ ignoreSearch: true }));
+    const matchingIds = new Set(filteredQuestions().map((item) => item.id));
+    const currentId = state.question?.id;
+    state.queue = state.queueSource.filter((item) => matchingIds.has(item.id));
+    const currentIndex = state.queue.findIndex((item) => item.id === currentId);
+    state.queueIndex = currentIndex >= 0 ? currentIndex : Math.min(state.queueIndex, Math.max(0, state.queue.length - 1));
     if (!state.queue.some((item) => item.id === state.question?.id)) {
       resetQuestionState();
       if (state.queue.length) selectFromQueue();
@@ -1047,11 +1106,21 @@ app.addEventListener('input', (event) => {
     } else {
       render();
     }
+    const searchInput = app.querySelector('[data-input="search"]');
+    searchInput?.focus();
+    if (searchInput && selectionStart !== null && selectionEnd !== null) searchInput.setSelectionRange(selectionStart, selectionEnd);
   }
 });
 
 app.addEventListener('change', (event) => {
   const input = event.target;
+  if (input.dataset.input === 'order' || input.dataset.input === 'unseen') {
+    if (input.dataset.input === 'order') state.practiceOptions.order = input.value === 'random' ? 'random' : 'fixed';
+    else state.practiceOptions.unseenOnly = input.checked;
+    savePracticeOptions();
+    startPracticeQueue();
+    return;
+  }
   if (input.dataset.input === 'subject' || input.dataset.input === 'category' || input.dataset.input === 'mode') {
     state.filters[input.dataset.input] = input.value;
     if (input.dataset.input === 'category' && input.value === '全部类别') {
